@@ -9,13 +9,15 @@ class APIUsageTracker:
         self.limit = 490  # 10 requests safety buffer below Google's 500 limit
         self.rpm_limit = 15 # Google's 15 requests per minute limit per key
         
-        # We only save daily usage to disk, other stats (circuit breaker, rpm) are in-memory.
+        # Daily usage + circuit-breaker bans are persisted; RPM stays in-memory.
         self.usage_data = self._load()
         
-        # Circuit Breaker: api_key -> consecutive_errors
+        # Circuit Breaker: api_key -> consecutive_errors (in-memory only)
         self.consecutive_errors = {}
-        # Ban expiry: api_key -> timestamp (seconds since epoch)
-        self.banned_until = {}
+        # Ban expiry: api_key -> timestamp (seconds since epoch) — PERSISTED across restarts
+        self.banned_until = self.usage_data.get("_bans", {})
+        if not isinstance(self.banned_until, dict):
+            self.banned_until = {}
         
         # RPM Tracking: api_key -> list of timestamps (seconds)
         self.rpm_timestamps = {}
@@ -31,8 +33,12 @@ class APIUsageTracker:
         
     def _save(self):
         try:
-            with open(self.filename, 'w', encoding='utf-8') as f:
-                json.dump(self.usage_data, f)
+            data = dict(self.usage_data)
+            data["_bans"] = self.banned_until
+            tmp = f"{self.filename}.tmp"
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(data, f)
+            os.replace(tmp, self.filename)
         except Exception:
             pass
             
@@ -43,14 +49,15 @@ class APIUsageTracker:
     def is_key_available(self, api_key: str) -> bool:
         now = time.time()
         
-        # 1. Circuit Breaker Check
+        # 1. Circuit Breaker Check (survives restarts now)
         if api_key in self.banned_until:
             if now < self.banned_until[api_key]:
                 return False
             else:
-                # Ban expired
+                # Ban expired → clear it from memory AND disk
                 del self.banned_until[api_key]
                 self.consecutive_errors[api_key] = 0
+                self._save()
                 
         # 2. RPM Check
         if api_key in self.rpm_timestamps:
@@ -60,9 +67,11 @@ class APIUsageTracker:
             if len(recent) >= self.rpm_limit:
                 return False
                 
-        # 3. Daily Limit Check
+        # 3. Daily Limit Check (ignore the reserved "_bans" key)
         today = self._get_today_str()
         key_data = self.usage_data.get(api_key, {})
+        if not isinstance(key_data, dict):
+            return True
         
         # If the key was used on a previous day, it is available (and starts at 0)
         if key_data.get("date") != today:
@@ -81,6 +90,8 @@ class APIUsageTracker:
         # Update Daily
         today = self._get_today_str()
         key_data = self.usage_data.get(api_key, {})
+        if not isinstance(key_data, dict):
+            key_data = {}
         
         if key_data.get("date") != today:
             key_data = {"date": today, "count": 1}
@@ -103,6 +114,7 @@ class APIUsageTracker:
             # Ban for 3 hours (10800 seconds)
             print(f"🛑 Circuit Breaker TRIPPED for key {api_key[:8]}...! Banning for 3 hours.")
             self.banned_until[api_key] = time.time() + (3 * 3600)
+            self._save()  # persist ban so a restart doesn't resurrect dead keys
 
 # Global singleton instance
 api_tracker = APIUsageTracker()

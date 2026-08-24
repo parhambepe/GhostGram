@@ -1,7 +1,7 @@
 import asyncio
 import re
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import MessageIdInvalidError, FloodWaitError
@@ -15,6 +15,9 @@ from assistant_manager import assistant_manager
 from memory_manager import memory_manager
 from typing_helper import ContinuousTyping, calculate_human_typing_delay
 from time_utils import get_current_persian_datetime
+from media_processor import media_processor
+from reminder_manager import reminder_manager
+from reminder_parser import reminder_parser, AI_PARSE_PROMPT, extract_json_block
 from health_server import start_health_server
 import random
 
@@ -29,10 +32,10 @@ def is_owner(event) -> bool:
     """Strict check to ensure commands only run for the owner (outgoing messages from this account)."""
     return bool(event and event.out)
 
-async def get_response(user_message: str, system_prompt: str = None, is_json: bool = False) -> str:
+async def get_response(user_message: str, system_prompt: str = None, is_json: bool = False, parts=None, use_search: bool = False) -> str:
     if system_prompt is None:
         system_prompt = persona_manager.get_prompt("normal")
-    return await gemini.get_response(user_message, system_prompt, is_json=is_json)
+    return await gemini.get_response(user_message, system_prompt, is_json=is_json, parts=parts, use_search=use_search)
 
 async def format_sender_name(sender, my_id: int) -> str:
     if not sender:
@@ -480,9 +483,28 @@ async def incoming_message_handler(event):
 
     # Check incoming content
     incoming_text = event.text or ""
-    if not incoming_text.strip():
-        # Might be sticker/photo without caption
+    
+    # 👁️🎙️ Media support: photos & voice notes are understood even without caption
+    media_part = None
+    if getattr(event, "photo", None) or getattr(event, "voice", None) or getattr(event, "audio", None):
+        media_part = await media_processor.build_part(client, event)
+        if media_part is None:
+            # Media exists but download failed → treat as text-only message
+            if not incoming_text.strip():
+                return
+    elif not incoming_text.strip():
+        # Other media types (stickers, video, files...) without caption → skip
         return
+
+    media_note = ""
+    if media_part is not None:
+        kind = media_processor.describe_media(event)
+        media_note = f"\n(مخاطب {kind} فرستاده است"
+        if not incoming_text.strip():
+            media_note += " بدون توضیح متنی"
+        else:
+            media_note += f" با این توضیح: {incoming_text[:200]}"
+        media_note += ". محتوای آن در ادامه به‌صورت داده چندرسانه‌ای ضمیمه شده است)\n"
 
     # Track the latest message ID for this chat to debounce rapid spam
     chat_latest_msg[chat_id] = event.id
@@ -524,7 +546,7 @@ async def incoming_message_handler(event):
                     long_term_context=ltm_context,
                     history_text=history_text,
                     sender=sender_name,
-                    target_text=incoming_text
+                    target_text=(media_note + incoming_text) if media_note else incoming_text
                 )
                 system_prompt = persona_manager.get_prompt(pal_variant)
                 print(f"🤖 Pal Autopilot ({pal_variant.upper()}) thinking & typing for chat {chat_id} (from {sender_name})...")
@@ -534,12 +556,14 @@ async def incoming_message_handler(event):
                     long_term_context=ltm_context,
                     history_text=history_text,
                     sender=sender_name,
-                    target_text=incoming_text
+                    target_text=(media_note + incoming_text) if media_note else incoming_text
                 )
                 system_prompt = persona_manager.get_prompt("assistant")
                 print(f"💼 Personal Assistant thinking & typing for chat {chat_id} (from {sender_name})...")
             
-            response = await get_response(prompt_input, system_prompt)
+            # Pass the photo/voice bytes alongside the prompt when present
+            parts = [media_part] if media_part is not None else None
+            response = await get_response(prompt_input, system_prompt, parts=parts)
             
             if response and response != Text.ERROR:
                 human_typing_time = calculate_human_typing_delay(response)
@@ -555,6 +579,191 @@ async def incoming_message_handler(event):
                 # Record message for rolling long-term memory summary check
                 memory_manager.record_message_and_check_summary(client, chat_id, gemini, format_sender_name, my_id)
 
+
+# ==========================================================
+# 📋 COMMAND: خلاصه چت (CATCH-UP SUMMARY / 222)
+# ==========================================================
+@client.on(events.NewMessage(outgoing=True, pattern=r'^222(?:\s+(\d+))?$'))
+async def catchup_summary_handler(event):
+    if not is_owner(event):
+        return
+
+    hours_arg = event.pattern_match.group(1)
+    hours = int(hours_arg) if hours_arg else 12
+    if hours < 1:
+        hours = 1
+    if hours > 72:
+        hours = 72
+    chat_id = event.chat_id
+
+    try:
+        await event.delete()
+    except Exception:
+        pass
+
+    global my_info
+    my_id = my_info.id if my_info else Config.OWNER_ID
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    lines = []
+    try:
+        async for msg in client.iter_messages(chat_id, limit=200):
+            msg_ts = msg.date.replace(tzinfo=timezone.utc)
+            if msg_ts < since:
+                break
+            if not msg or not msg.text:
+                continue
+            sender = await msg.get_sender()
+            name = await format_sender_name(sender, my_id)
+            time_str = msg.date.strftime("%H:%M")
+            content = memory_manager.truncate_segment(msg.text, 150)
+            lines.append(f"[{time_str}] {name}: {content}")
+    except Exception as e:
+        print(f"⚠️ Catch-up fetch error in chat {chat_id}: {e}")
+
+    input_chat = await event.get_input_chat()
+    if len(lines) < 3:
+        await client.send_message(input_chat, "در این بازه پیام قابل‌توجهی نبود.")
+        return
+
+    history_text = "\n".join(reversed(lines))
+    now_persian = get_current_persian_datetime()
+    prompt = f"""[زمان فعلی: {now_persian}]
+گفتگوی گروه در {hours} ساعت گذشته:
+{history_text}
+
+شما شایان هستید و به‌تازگی به این گفتگو برگشته‌اید. یک خلاصه روان و خودمونی از اتفاقاتی که از دست داده‌اید بنویسید:
+۱. چه خبر بوده و چه بحث‌هایی شده (۲ تا ۴ خط)
+۲. اگر تصمیم یا توافقی شده بود بگو
+۳. اگر کسی مستقیماً از شما سؤالی پرسیده یا منتظر جواب بود، آخر خلاصه با «⚠️ نیاز به پاسخ:» اشاره کن
+خودمونی، بدون ایموجی، حداکثر ۶ خط."""
+
+    system_prompt = persona_manager.get_prompt("normal")
+    status = await client.send_message(input_chat, "در حال جمع‌بندی گفتگو...")
+    async with ContinuousTyping(client, input_chat):
+        summary = await get_response(prompt, system_prompt)
+    try:
+        await status.delete()
+    except Exception:
+        pass
+    if summary and summary != Text.ERROR:
+        await client.send_message(input_chat, f"📋 خلاصه {hours} ساعت اخیر:\n\n{summary}")
+        print(f"📋 Catch-up summary sent for chat {chat_id} ({len(lines)} msgs)")
+
+# ==========================================================
+# 🌐 COMMAND: جستجوی وب (WEB SEARCH / 112)
+# ==========================================================
+@client.on(events.NewMessage(outgoing=True, pattern=r'^112\s+(.+)$'))
+async def web_search_handler(event):
+    if not is_owner(event):
+        return
+    query = (event.pattern_match.group(1) or "").strip()
+    chat_id = event.chat_id
+    reply_to_id = event.reply_to_msg_id
+
+    try:
+        await event.delete()
+    except Exception:
+        pass
+
+    if not query:
+        return
+
+    input_chat = await event.get_input_chat()
+    now_persian = get_current_persian_datetime()
+
+    # If replying to a message, include its content as context for the query
+    context_note = ""
+    if reply_to_id:
+        try:
+            reply_msg = await event.get_reply_message()
+            if reply_msg and reply_msg.text:
+                context_note = f"\n[متن پیام ریپلای‌شده که سؤال درباره آن است]:\n{reply_msg.text[:1000]}\n"
+        except Exception:
+            pass
+
+    prompt = f"""سؤال کاربر: {query}
+{context_note}
+پاسخ کوتاه، دقیق و خودمونی بده. اطلاعات به‌روز لازم است پس از جستجوی گوگل استفاده کن.
+[زمان فعلی: {now_persian}]"""
+
+    system_prompt = "تو دستیار شخصی هستی که با جستجوی وب اطلاعات دقیق و به‌روز پیدا می‌کند. پاسخ فارسی، روان، بدون ایموجی و کوتاه."
+    print(f"🌐 Web search requested in chat {chat_id}: {query[:60]}...")
+    async with ContinuousTyping(client, input_chat):
+        response = await gemini.get_response(prompt, system_prompt, use_search=True)
+        if response and response != Text.ERROR:
+            human_typing_time = calculate_human_typing_delay(response)
+            await asyncio.sleep(human_typing_time)
+            await client.send_message(input_chat, response, reply_to=reply_to_id)
+            print(f"🌐 Web answer sent in chat {chat_id}")
+        else:
+            print(f"⚠️ Web search failed for chat {chat_id}")
+
+# ==========================================================
+# ⏰ COMMAND: یادآور هوشمند (SMART REMINDER / 555 <دستور>)
+# ==========================================================
+@client.on(events.NewMessage(outgoing=True, pattern=r'^555\s+(.+)$'))
+async def smart_reminder_handler(event):
+    if not is_owner(event):
+        return
+    instruction = (event.pattern_match.group(1) or "").strip()
+    chat_id = event.chat_id
+
+    try:
+        await event.delete()
+    except Exception:
+        pass
+    if not instruction:
+        return
+
+    input_chat = await event.get_input_chat()
+
+    # Step 1: deterministic parsing (fast + free)
+    due_dt, text_rem = reminder_parser.parse(instruction)
+
+    # Step 2: AI fallback for complex expressions
+    if due_dt is None:
+        now_str = get_current_persian_datetime()
+        ai_prompt = AI_PARSE_PROMPT.format(text=instruction, now=now_str)
+        raw = await gemini.get_response(
+            ai_prompt,
+            "تو یک پارسر زمان فارسی هستی. فقط و فقط JSON خروجی بده.",
+            is_json=True
+        )
+        data = extract_json_block(raw or "")
+        if data and data.get("due_time"):
+            try:
+                due_dt = datetime.strptime(str(data["due_time"]).strip(), "%Y-%m-%d %H:%M")
+                text_rem = str(data.get("text") or instruction)[:300]
+            except ValueError:
+                due_dt = None
+        if due_dt is None:
+            await client.send_message(input_chat, "زمان یادآور رو متوجه نشدم. مثلاً بگو: 555 تا ۲ ساعت دیگه به علی بگو بیاد")
+            return
+
+    rem = reminder_manager.add_reminder(chat_id, due_dt, text_rem or instruction)
+    local_due = datetime.fromtimestamp(rem["due_ts"], tz=reminder_manager._iran_tz())
+    await client.send_message(
+        input_chat,
+        f"⏰ باشه، یادت می‌ندازم:\n«{(text_rem or instruction)[:200]}»\n🕒 موعده: {local_due.strftime('%H:%M')} ({local_due.strftime('%Y-%m-%d')})"
+    )
+    print(f"⏰ Reminder #{reminder_manager._next_id - 1} set for chat {chat_id} at {local_due}")
+
+async def reminder_loop():
+    """Background task that fires due reminders."""
+    while True:
+        try:
+            await asyncio.sleep(15)
+            for r in reminder_manager.pop_due():
+                try:
+                    input_chat = await client.get_input_entity(r["chat_id"])
+                    await client.send_message(input_chat, f"⏰ یادآوری: {r['text']}")
+                    print(f"⏰ Reminder fired for chat {r['chat_id']}: {r['text'][:50]}")
+                except Exception as e:
+                    print(f"⚠️ Reminder delivery failed: {e}")
+        except Exception as e:
+            print(f"⚠️ Reminder Loop Error: {e}")
+            await asyncio.sleep(30)
 
 auto_engage_schedule = {} # dict: chat_id -> (next_engage_timestamp, configured_duration_minutes)
 
@@ -694,6 +903,7 @@ def main():
     
     # Start background loops
     client.loop.create_task(auto_engage_loop())
+    client.loop.create_task(reminder_loop())
     
     print("=" * 50)
     print(f"👻 GhostGram (روح‌گرام) is ONLINE & READY!")
@@ -702,7 +912,9 @@ def main():
     print(f"📱 Active Pal Chats (777): {pal_manager.get_active_count()}")
     print(f"🕵️ Auto-Engage Chats (777 engage): {pal_manager.get_auto_engage_count()}")
     print(f"💼 Assistant Mode (666): {'ON (All DMs)' if assistant_manager.dm_enabled else 'OFF'}")
-    print("🚀 Listening for secret codes (777, 777 engage, 666, 000, 444, 555, 333, 999, 111, 888)...")
+    pending_rem = len(reminder_manager.list_pending())
+    print(f"⏰ Pending reminders: {pending_rem}")
+    print("🚀 Listening for secret codes (777, 777 engage, 666, 444, 555 <یادآور>, 333, 999, 222 خلاصه, 112 جستجو, 111, 888)...")
     print("=" * 50)
     
     client.run_until_disconnected()

@@ -1,34 +1,18 @@
-# General
-__pycache__/
-*.py[cod]
-*$py.class
-.DS_Store
-.thumbs
-
-# Virtual Environment
+# state files (runtime data)
+pal_state.json
+assistant_state.json
+memory_state.json
+reminders_state.json
+api_usage.json
+apis.txt
+*.session
+*.session-journal
 venv/
 env/
 .venv/
+__pycache__/
+*.py[cod]
 .env
-
-# Telethon
-*.session
-*.session-journal
-
-# Logs & Databases
 *.log
-*.sqlite3
-*.db
-
-# IDEs
 .idea/
 .vscode/
-*.swp
-*.bak
-
-# TeleAgent Specific
-apis.txt
-*.json
-teleagent_deploy.zip
-teleagent_deploy_config.json
-*.zip

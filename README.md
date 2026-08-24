@@ -114,6 +114,29 @@
 > [!IMPORTANT]
 > **Owner-Only Security**: All stealth codes are strictly restricted to your personal Telegram account (`event.out`). Any command you send **deletes itself immediately**, keeping your automation 100% invisible.
 
+| Code | Action |
+|---|---|
+| `777` / `777 <persona>` | Pal Mode ON (autonomous alter-ego in this chat) |
+| `000` / `000 all` | Pal Mode OFF (this chat / all chats) |
+| `777 engage [min]` | Auto-Engage lurker ON (default 20 min) |
+| `777 engage off [all]` | Auto-Engage OFF |
+| `666` | Assistant Mode ON (all DMs) |
+| `444` / `444 all` | Assistant OFF (this chat / all) |
+| `222 [hours]` | 📋 **NEW — Group catch-up summary** (what you missed; default 12h, max 72h) |
+| `112 <question>` | 🌐 **NEW — Web search** via Google Search grounding (real-time answers) |
+| `555 <instruction>` | ⏰ **NEW — Smart reminder**: `555 ساعت 21 به علی بگو تماس بگیره` · `555 تا ۲ ساعت دیگه دارو بخور` |
+| `333` | Reset short-term memory of this chat |
+| `999 [n]` | Ghost Purge (delete your messages) |
+| `111 [text]` | Smart custom reply (use while replying to a message) |
+| `555` (bare) / `888` | Status report / Help |
+
+### 👁️ Multimodal Understanding (NEW)
+When Pal or Assistant mode is active, the bot now **understands photos and voice notes** — not just text:
+- Send a photo → it is analyzed by Gemini and answered naturally.
+- Send a voice message → it is transcribed/understood by Gemini and answered in chat.
+
+*(reminders survive restarts — persisted in `reminders_state.json`)*
+
 ```
                   ┌─────────────────────────────────────────────────────────┐
                   │               GhostGram Stealth Trigger Map             │

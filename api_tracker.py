@@ -111,12 +111,36 @@ class APIUsageTracker:
         """Increment consecutive errors, ban if >= 3."""
         errors = self.consecutive_errors.get(api_key, 0) + 1
         self.consecutive_errors[api_key] = errors
-        
+
         if errors >= 3:
-            # Ban for 3 hours (10800 seconds)
-            print(f"🛑 Circuit Breaker TRIPPED for key {api_key[:8]}...! Banning for 3 hours.")
-            self.banned_until[api_key] = time.time() + (3 * 3600)
+            # Ban duration: with several keys a 3h ban gives the others room.
+            # With a SINGLE key a 3h ban means total blindness — cap it short so
+            # the bot degrades instead of dying (rate limits usually clear fast).
+            try:
+                key_count = max(1, len(Config.GEMINI_API_KEYS))
+            except Exception:
+                key_count = 1
+            ban_seconds = (3 * 3600) if key_count > 1 else (15 * 60)
+            print(f"🛑 Circuit Breaker TRIPPED for key {api_key[:8]}...! Banning for {ban_seconds // 60} minutes.")
+            self.banned_until[api_key] = time.time() + ban_seconds
             self._save()  # persist ban so a restart doesn't resurrect dead keys
+
+    def lift_all_bans_if_blind(self):
+        """Self-heal: if EVERY configured key is banned, clear the bans.
+
+        A fully-blind bot is worse than a rate-limited one; Google's per-minute
+        limits recover on their own, so retrying is the better failure mode.
+        """
+        if not self.banned_until or not Config.GEMINI_API_KEYS:
+            return
+        now = time.time()
+        active_bans = [k for k in Config.GEMINI_API_KEYS if self.banned_until.get(k, 0) > now]
+        if active_bans and len(active_bans) >= len(Config.GEMINI_API_KEYS):
+            print("🔓 ALL keys banned — lifting circuit-breaker bans to avoid total blindness.")
+            for k in active_bans:
+                del self.banned_until[k]
+            self.consecutive_errors.clear()
+            self._save()
 
 # Global singleton instance
 api_tracker = APIUsageTracker()

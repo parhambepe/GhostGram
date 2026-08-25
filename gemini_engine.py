@@ -52,6 +52,9 @@ class GeminiEngine:
         """Returns the next available API key in round-robin fashion, respecting daily limits."""
         with self._idx_lock:
             from api_tracker import api_tracker
+            # Self-heal: if every key is circuit-breaker-banned, lift the bans —
+            # a blind bot is worse than a rate-limited one.
+            api_tracker.lift_all_bans_if_blind()
             num_keys = len(self.keys)
             for _ in range(num_keys):
                 self.current_key_idx = (self.current_key_idx + 1) % num_keys

@@ -707,15 +707,26 @@ async def incoming_message_handler(event):
                 
                 reply_target = event.id if (event.is_group or event.is_channel) else None
                 try:
-                    # 🎭 Sticker reply: model answered with exactly "[استیکر]" → send best matching taught sticker
-                    if response.strip() == "[استیکر]":
+                    # 🎭 Sticker reply: model answered with the sticker marker → send best taught sticker
+                    def _norm_sticker_reply(s: str) -> str:
+                        s = re.sub(r'[\u200c\u200f\u200e\ufeff]', '', s or "")
+                        s = s.translate(str.maketrans({'ي': 'ی', 'ك': 'ک', 'ى': 'ی'}))
+                        return re.sub(r'\[\s*استیکر\s*\]', '[استیکر]', s.strip())
+
+                    if _norm_sticker_reply(response) == "[استیکر]":
                         doc = await sticker_manager.resolve_document_async(client, _pick_sticker_for_context(history_text + " " + incoming_text))
                         if doc is not None:
                             await client.send_file(input_chat, doc, reply_to=reply_target)
                             print(f"🎭 Replied with a taught sticker in chat {chat_id}")
                             memory_manager.record_message_and_check_summary(client, chat_id, gemini, format_sender_name, my_id)
                             return
-                        # No cached document → fall through to text reply below
+                        # Could not resolve any sticker → NEVER send the raw marker.
+                        # Re-ask the model for a plain text answer (sticker option removed).
+                        print("🎭 Marker received but no resolvable sticker; re-asking as text...")
+                        prompt_input = prompt_input + "\n\n[مهم: استیکری در دسترس نیست. حتماً متنی و طبیعی جواب بده.]"
+                        response = await get_response(prompt_input, system_prompt, parts=parts)
+                        if not response or response == Text.ERROR or _norm_sticker_reply(response) == "[استیکر]":
+                            response = "..."
                     await client.send_message(input_chat, response, reply_to=reply_target)
                 except FloodWaitError as e:
                     await asyncio.sleep(min(e.seconds + 1, 300))

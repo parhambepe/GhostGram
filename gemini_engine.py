@@ -20,7 +20,7 @@ except Exception:  # pragma: no cover - telethon always present in prod, guard a
 class GeminiEngine:
     # Retry policy: after ALL keys fail, retry the whole cycle at most this many times.
     MAX_GLOBAL_RETRIES = 3
-    RETRY_SLEEP_SECONDS = 30
+    RETRY_SLEEP_SECONDS = 8  # short pause between cycles; Google hangs are per-call, not per-minute
 
     def __init__(self):
         self.keys = Config.GEMINI_API_KEYS

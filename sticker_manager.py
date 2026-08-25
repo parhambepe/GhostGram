@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+from telethon.tl.types import Document
 from config import Config
 
 
@@ -79,8 +80,12 @@ class StickerManager:
         key, info, _ = cls.sticker_key(message)
         return key, info
 
-    def teach(self, message, meaning: str):
-        """Teach the meaning of the sticker in `message`. Returns True if newly taught."""
+    def teach(self, message, meaning: str, chat_id=None, msg_id=None):
+        """Teach the meaning of the sticker in `message`. Returns True if newly taught.
+
+        chat_id/msg_id are stored as a fallback ref so the Document can be
+        re-fetched after a restart (the in-memory cache is lost).
+        """
         fid, info = self.sticker_info(message)
         if not fid or not meaning.strip():
             return False
@@ -91,6 +96,12 @@ class StickerManager:
             "kind": info["kind"],
             "meaning": meaning.strip()[:300],
         })
+        if chat_id is not None and msg_id is not None:
+            entry["chat_id"] = chat_id
+            entry["msg_id"] = msg_id
+        elif "chat_id" not in entry and getattr(message, "chat_id", None) and getattr(message, "id", None):
+            entry["chat_id"] = message.chat_id
+            entry["msg_id"] = message.id
         self.stickers[fid] = entry
         if fid not in self.pool:
             self.pool.append(fid)
@@ -136,7 +147,9 @@ class StickerManager:
     def pick_best(self, client, hint_text: str):
         """
         Pick the taught sticker whose meaning best matches hint_text using simple
-        keyword overlap scoring (no AI call needed). Returns a cached Telethon Document or None.
+        keyword overlap scoring (no AI call needed). Returns the storage KEY (str)
+        of the best match, or None — NOT a Document. Resolution to a Document
+        happens in _resolve_document().
         """
         best_id, best_score = None, 0
         hint = (hint_text or "").strip()
@@ -157,11 +170,27 @@ class StickerManager:
         if best_id is None and self.pool:
             # no textual match: fall back to most recently taught
             best_id = self.pool[-1]
-        return self._resolve_document(client, best_id)
+        return best_id
 
     async def resolve_document_async(self, client, fid):
-        """Async resolution of a stored short id into a sendable Document ref."""
-        return await asyncio.get_event_loop().run_in_executor(None, self._resolve_document, client, fid)
+        """Resolve a stored sticker key into a sendable Telethon Document (or None)."""
+        if not fid or isinstance(fid, Document):
+            return None if isinstance(fid, Document) else fid
+        doc = self._resolve_document(client, fid)
+        if doc is not None:
+            return doc
+        # Not in cache: fetch the document from the volume-persisted message ref
+        ref = (self.stickers.get(fid) or {}).get("chat_id"), (self.stickers.get(fid) or {}).get("msg_id")
+        chat_id, msg_id = ref
+        if chat_id and msg_id:
+            try:
+                msg = await client.get_messages(chat_id, ids=msg_id)
+                if msg and getattr(msg, "sticker", None) is not None:
+                    self.remember_document(client, msg)
+                    return msg.sticker
+            except Exception as e:
+                print(f"⚠️ Sticker refetch failed for {fid}: {e}")
+        return None
 
     def _resolve_document(self, client, fid):
         """Resolve stored key back to a cached Document (populated by remember_document)."""

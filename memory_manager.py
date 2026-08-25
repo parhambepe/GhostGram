@@ -119,7 +119,7 @@ class MemoryManager:
         
         try:
             async for msg in client.iter_messages(chat_id, limit=limit):
-                if not msg or not msg.text:
+                if not msg or (not msg.text and not getattr(msg, "sticker", None)):
                     continue
                 
                 msg_ts = msg.date.replace(tzinfo=timezone.utc).timestamp()
@@ -129,6 +129,14 @@ class MemoryManager:
                 sender = await msg.get_sender()
                 name = await format_sender_fn(sender, my_id)
                 time_str = msg.date.strftime("%H:%M")
+
+                # 🎭 Stickers: show emoji + taught meaning instead of empty text
+                if getattr(msg, "sticker", None) is not None:
+                    from sticker_manager import sticker_manager
+                    desc = sticker_manager.describe_for_prompt(msg) or "استیکر"
+                    content = f"[{desc}]"
+                else:
+                    content = self.truncate_segment(msg.text, self.max_segment_chars)
                 
                 # Context disambiguation: Check if this message was in reply to someone
                 reply_info = ""
@@ -142,7 +150,7 @@ class MemoryManager:
                     except Exception:
                         pass
                 
-                cleaned_content = self.truncate_segment(msg.text, self.max_segment_chars)
+                cleaned_content = content
                 
                 if include_id:
                     messages.append(f"(ID: {msg.id}) [{time_str}] {name}{reply_info}: {cleaned_content}")

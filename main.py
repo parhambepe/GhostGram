@@ -18,6 +18,7 @@ from time_utils import get_current_persian_datetime
 from media_processor import media_processor
 from reminder_manager import reminder_manager
 from reminder_parser import reminder_parser, AI_PARSE_PROMPT, extract_json_block
+from sticker_manager import sticker_manager
 from health_server import start_health_server
 from notifier import notifier
 import random
@@ -132,20 +133,53 @@ async def pal_off_handler(event):
 # ==========================================================
 # 🕵️ COMMAND: پراکنش / تعامل خودکار (AUTO ENGAGE ON / 777 engage)
 # ==========================================================
-@client.on(events.NewMessage(outgoing=True, pattern=r'^777\s+engage(?:\s+(\d+))?$'))
+@client.on(events.NewMessage(outgoing=True, pattern=r'^777\s+engage(?:\s+(\d+|auto))?$'))
 async def auto_engage_on_handler(event):
     if not is_owner(event):
         return
     
     chat_id = event.chat_id
-    duration = int(event.pattern_match.group(1)) if event.pattern_match.group(1) else 20
-    if duration < 1:
-        duration = 1
+    val = event.pattern_match.group(1)
+
+    if val == "auto":
+        # Smart mode: measure chat speed and target ~5% bot presence
+        await confirm("⏳ در حال سنجش سرعت چت برای تنظیم هوشمند زمان تعامل...")
+        duration = await calculate_dynamic_engage_duration(chat_id)
+    else:
+        duration = int(val) if val else 20
+        if duration < 1:
+            duration = 1
     
     pal_manager.activate_auto_engage(chat_id, duration)
     await safe_delete(event)
     await confirm(f"🕵️ Auto-Engage در چت `{chat_id}` فعال شد (هر ~{duration} دقیقه).")
     print(f"🕵️ Auto-Engage (Lurker) ACTIVATED for chat {chat_id} with duration {duration}m")
+
+
+async def calculate_dynamic_engage_duration(chat_id) -> int:
+    """Calculates the best auto-engage duration based on chat speed (targeting ~5% bot presence)."""
+    try:
+        messages = await client.get_messages(chat_id, limit=50)
+        if len(messages) < 10:
+            return 20  # Fallback if there are too few messages
+
+        oldest_msg = messages[-1]
+        newest_msg = messages[0]
+
+        timespan_minutes = (newest_msg.date - oldest_msg.date).total_seconds() / 60.0
+        if timespan_minutes <= 0:
+            return 2
+
+        mins_per_msg = timespan_minutes / len(messages)
+
+        # Target: 1 bot message for every ~20 human messages (5% presence)
+        target_duration = int(mins_per_msg * 20)
+
+        # Clamp between 2 and 120 minutes
+        return max(2, min(target_duration, 120))
+    except Exception as e:
+        print(f"⚠️ Error calculating dynamic duration for {chat_id}: {e}")
+        return 20  # Safe fallback
 
 # ==========================================================
 # 🛑 COMMAND: خاموش کردن تعامل (AUTO ENGAGE OFF / 777 engage off)
@@ -236,6 +270,48 @@ async def blacklist_handler(event):
         assistant_manager.blacklist_remove(target_user_id)
         print(f"✅ Un-blacklisted user {target_user_id}")
         await confirm(Text.BLACKLIST_REMOVED.format(user_id=target_user_id))
+
+# ==========================================================
+# 🎭 COMMAND: آموزش استیکر (!استیکر <توضیح> روی پیام استیکر)
+# ==========================================================
+@client.on(events.NewMessage(outgoing=True, pattern=r'^!استیکر(?:\s+(.+))?$'))
+async def sticker_teach_handler(event):
+    if not is_owner(event):
+        return
+    meaning = (event.pattern_match.group(1) or "").strip()
+    reply_msg = await event.get_reply_message() if event.is_reply else None
+
+    await safe_delete(event)
+
+    # List mode
+    if meaning in ("لیست", "list", ""):
+        listing = sticker_manager.list_known()
+        if listing:
+            await confirm(f"🎭 استیکرهای آموخته‌شده:\n\n{listing}")
+        else:
+            await confirm("🎭 هنوز هیچ استیکری آموزش داده نشده.\nروی یک استیکر ریپلای کن و بنویس: `!استیکر <توضیح>`")
+        return
+
+    if not reply_msg or getattr(reply_msg, "sticker", None) is None:
+        await confirm("⚠️ باید روی پیامِ **استیکر** ریپلای کنی.")
+        return
+
+    if meaning in ("حذف", "remove", "پاک"):
+        removed = sticker_manager.unteach(reply_msg)
+        if removed:
+            print(f"🎭 Sticker un-taught: {removed[:50]}")
+            await confirm(f"🗑 استیکر از پول ارسال حذف شد ({removed[:60]}).")
+        else:
+            await confirm("⚠️ این استیکر توی پول ارسال نبود.")
+        return
+
+    info = sticker_manager.sticker_info(reply_msg)
+    fid = info[0]
+    newly = sticker_manager.teach(reply_msg, meaning)
+    sticker_manager.remember_document(client, reply_msg)
+    emoji = info[1]["emoji"] if info and info[1] else ""
+    print(f"🎭 Sticker {'taught' if newly else 'updated'}: {emoji} -> {meaning[:60]}")
+    await confirm(f"🎭 یاد گرفتم! {emoji} یعنی: {meaning[:100]}")
 
 # ==========================================================
 # 📊 COMMAND: وضعیت (STATUS / 555)
@@ -446,6 +522,14 @@ def get_chat_lock(chat_id):
         chat_locks[chat_id] = asyncio.Lock()
     return chat_locks[chat_id]
 
+
+def _pick_sticker_for_context(context_text: str):
+    """Chooses the best taught sticker for the conversation context (keyword overlap)."""
+    from sticker_manager import sticker_manager
+    # pick_best is sync (no IO); call directly
+    doc = sticker_manager.pick_best(client, context_text)
+    return doc
+
 @client.on(events.NewMessage(incoming=True))
 async def incoming_message_handler(event):
     chat_id = event.chat_id
@@ -502,7 +586,15 @@ async def incoming_message_handler(event):
 
     # Check incoming content
     incoming_text = event.text or ""
-    
+
+    # 🎭 Sticker handling: taught stickers are understood (and remembered for re-send)
+    sticker_desc = None
+    if getattr(event, "sticker", None) is not None:
+        from sticker_manager import sticker_manager
+        sticker_manager.remember_document(client, event)
+        sticker_desc = sticker_manager.describe_for_prompt(event)
+        incoming_text = f"[{sticker_desc}]" if sticker_desc else "[استیکر]"
+
     # 👁️🎙️🎬 Media support: photos, voice notes & video notes are understood even without caption
     media_part = None
     has_supported_media = bool(
@@ -519,7 +611,7 @@ async def incoming_message_handler(event):
             if not incoming_text.strip():
                 return
     elif not incoming_text.strip():
-        # Other media types (stickers, files...) without caption → skip
+        # Other media types (files etc.) without caption → skip
         return
 
     media_note = ""
@@ -591,6 +683,22 @@ async def incoming_message_handler(event):
             
             # Pass the photo/voice/video bytes alongside the prompt when present
             parts = [media_part] if media_part is not None else None
+
+            # 🎭 Sticker awareness: tell the model it MAY answer with a taught sticker
+            from sticker_manager import sticker_manager
+            known_list = sticker_manager.list_known(limit=12)
+            if mode == "pal" and (sticker_desc or known_list):
+                sticker_hint = "\n\n[🎭 استیکرها: "
+                if known_list:
+                    sticker_hint += f"استیکرهای زیر رو یاد گرفتی و می‌تونی هر وقت به‌جا بود باهاشون جواب بدی:\n{known_list}\n"
+                if sticker_desc:
+                    sticker_hint += f"مخاطب الان این استیکر رو فرستاده: {sticker_desc}."
+                sticker_hint += ("\nاگر خواستی جواب‌ت فقط یک استیکر باشه، به‌جای متن، دقیقاً بنویس: [استیکر]\n"
+                                 "وگرنه مثل همیشه متنی جواب بده.]")
+                prompt_input = prompt_input + sticker_hint
+            elif mode == "pal" and not incoming_text.strip():
+                pass  # unreachable, kept for clarity
+
             response = await get_response(prompt_input, system_prompt, parts=parts)
             
             if response and response != Text.ERROR:
@@ -599,6 +707,15 @@ async def incoming_message_handler(event):
                 
                 reply_target = event.id if (event.is_group or event.is_channel) else None
                 try:
+                    # 🎭 Sticker reply: model answered with exactly "[استیکر]" → send best matching taught sticker
+                    if response.strip() == "[استیکر]":
+                        doc = await sticker_manager.resolve_document_async(client, _pick_sticker_for_context(history_text + " " + incoming_text))
+                        if doc is not None:
+                            await client.send_file(input_chat, doc, reply_to=reply_target)
+                            print(f"🎭 Replied with a taught sticker in chat {chat_id}")
+                            memory_manager.record_message_and_check_summary(client, chat_id, gemini, format_sender_name, my_id)
+                            return
+                        # No cached document → fall through to text reply below
                     await client.send_message(input_chat, response, reply_to=reply_target)
                 except FloodWaitError as e:
                     await asyncio.sleep(min(e.seconds + 1, 300))

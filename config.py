@@ -54,6 +54,7 @@ class Config:
     ASSISTANT_STATE_FILE = _state_path(os.getenv("ASSISTANT_STATE_FILE", "assistant_state.json"))
     MEMORY_STATE_FILE = _state_path(os.getenv("MEMORY_STATE_FILE", "memory_state.json"))
     REMINDERS_STATE_FILE = _state_path(os.getenv("REMINDERS_STATE_FILE", "reminders_state.json"))
+    STICKERS_STATE_FILE = _state_path(os.getenv("STICKERS_STATE_FILE", "stickers_state.json"))
     API_USAGE_FILE = _state_path(os.getenv("API_USAGE_FILE", "api_usage.json"))
 
     SHORT_TERM_MEMORY_LIMIT = int(os.getenv("SHORT_TERM_MEMORY_LIMIT", "30"))

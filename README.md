@@ -119,11 +119,15 @@
 | `777` / `777 <persona>` | Pal Mode ON (autonomous alter-ego in this chat) |
 | `000` / `000 all` | Pal Mode OFF (this chat / all chats) |
 | `777 engage [min]` | Auto-Engage lurker ON (default 20 min) |
+| `777 engage auto` | 🧠 **NEW — Smart Engage**: measures chat speed and sets the interval for ~5% bot presence (2–120 min) |
 | `777 engage off [all]` | Auto-Engage OFF |
 | `666` | Assistant Mode ON (all DMs) |
 | `444` / `444 all` or `444 کل` | Assistant OFF (this chat / all) |
 | `!مسدود` (reply) | 🚫 **NEW — Blacklist a user**: the assistant will never reply to them again (ID also accepted: `!مسدود 123456`) |
 | `!آزاد` (reply) | ✅ **NEW — Remove user from blacklist** |
+| `!استیکر <توضیح>` (on sticker reply) | 🎭 **NEW — Teach a sticker**: explain what it means; the bot remembers and can send it when fitting |
+| `!استیکر لیست` | 🎭 List all taught stickers |
+| `!استیکر حذف` (on sticker reply) | 🎭 Remove a taught sticker from the sendable pool |
 | `222 [hours]` | 📋 Group catch-up summary (what you missed; default 12h, max 72h) |
 | `112 <question>` | 🌐 Web search via Google Search grounding (longer timeout for grounded calls) |
 | `555 <instruction>` | ⏰ Smart reminder: `555 ساعت 21 به علی بگو تماس بگیره` · `555 تا ۲ ساعت دیگه دارو بخور` |

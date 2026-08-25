@@ -112,7 +112,7 @@
 ## 🎮 Stealth Command Matrix
 
 > [!IMPORTANT]
-> **Owner-Only Security**: All stealth codes are strictly restricted to your personal Telegram account (`event.out`). Any command you send **deletes itself immediately**, keeping your automation 100% invisible.
+> **Owner-Only Security**: All stealth codes are strictly restricted to your personal Telegram account (`event.out`). Any command you send **deletes itself immediately**, and a short confirmation is silently posted to your **Saved Messages** (auto-deleted after a few seconds).
 
 | Code | Action |
 |---|---|
@@ -121,21 +121,29 @@
 | `777 engage [min]` | Auto-Engage lurker ON (default 20 min) |
 | `777 engage off [all]` | Auto-Engage OFF |
 | `666` | Assistant Mode ON (all DMs) |
-| `444` / `444 all` | Assistant OFF (this chat / all) |
-| `222 [hours]` | 📋 **NEW — Group catch-up summary** (what you missed; default 12h, max 72h) |
-| `112 <question>` | 🌐 **NEW — Web search** via Google Search grounding (real-time answers) |
-| `555 <instruction>` | ⏰ **NEW — Smart reminder**: `555 ساعت 21 به علی بگو تماس بگیره` · `555 تا ۲ ساعت دیگه دارو بخور` |
+| `444` / `444 all` or `444 کل` | Assistant OFF (this chat / all) |
+| `!مسدود` (reply) | 🚫 **NEW — Blacklist a user**: the assistant will never reply to them again (ID also accepted: `!مسدود 123456`) |
+| `!آزاد` (reply) | ✅ **NEW — Remove user from blacklist** |
+| `222 [hours]` | 📋 Group catch-up summary (what you missed; default 12h, max 72h) |
+| `112 <question>` | 🌐 Web search via Google Search grounding (longer timeout for grounded calls) |
+| `555 <instruction>` | ⏰ Smart reminder: `555 ساعت 21 به علی بگو تماس بگیره` · `555 تا ۲ ساعت دیگه دارو بخور` |
 | `333` | Reset short-term memory of this chat |
 | `999 [n]` | Ghost Purge (delete your messages) |
 | `111 [text]` | Smart custom reply (use while replying to a message) |
 | `555` (bare) / `888` | Status report / Help |
 
-### 👁️ Multimodal Understanding (NEW)
-When Pal or Assistant mode is active, the bot now **understands photos and voice notes** — not just text:
+### 👁️ Multimodal Understanding
+When Pal or Assistant mode is active, the bot now **understands photos, voice notes, video notes and PDF/text documents** — not just text:
 - Send a photo → it is analyzed by Gemini and answered naturally.
 - Send a voice message → it is transcribed/understood by Gemini and answered in chat.
+- Send a video note / video → it is watched and understood (up to ~18 MB).
+- Send a PDF/text document → its content is read and understood.
 
-*(reminders survive restarts — persisted in `reminders_state.json`)*
+*(reminders survive restarts — persisted in `reminders_state.json` inside your volume)*
+
+### 🔔 Silent Feedback & Error Reporting
+- Every stealth command is confirmed in your **Saved Messages** and auto-deleted — zero traces in the target chat.
+- Engine/send failures are reported to **Saved Messages** so a headless Railway deployment never fails silently (disable with `NOTIFY_ERRORS=0`).
 
 ```
                   ┌─────────────────────────────────────────────────────────┐
@@ -147,8 +155,9 @@ When Pal or Assistant mode is active, the bot now **understands photos and voice
       [ PAL ENGINE ]     [ AUTO-ENGAGE ]     [ ASSISTANT ]        [ UTILITIES ]
       • 777 (Normal)     • 777 engage        • 666 (All DMs)      • 111 (Smart Reply)
       • 777 <persona>    • 777 engage <min>  • 444 (Mute Chat)    • 333 (Reset Memory)
-      • 000 (Off Chat)   • 777 engage off    • 444 all (Off)      • 999 (Ghost Purge)
+      • 000 (Off Chat)   • 777 engage off    • 444 all/کل (Off)   • 999 (Ghost Purge)
       • 000 all (Off)    • 777 engage off all                     • 555 (Live Status)
+                                                                  • !مسدود (Blacklist)
                                                                   • 888 (Help Menu)
 ```
 
@@ -156,20 +165,22 @@ When Pal or Assistant mode is active, the bot now **understands photos and voice
 
 | Stealth Trigger | Text Alias | Scope | Action & Description |
 | :--- | :--- | :---: | :--- |
-| `777` | `!رفیق روشن` | Single Chat | **Activate Pal Mode** with default conversational persona. |
-| `777 <persona>` | `!حالت <name>` | Single Chat | **Activate Custom Persona** (e.g., `777 lust`, `777 sarcastic`, `777 poetic`). |
-| `000` | `!خاموش` | Single Chat | **Deactivate Pal Mode** for the current chat. |
-| `000 all` | `!خاموش کل` | Global | **Deactivate Pal Mode Globally** across all active chats. |
-| `777 engage` | `!پراکنش` | Group Chat | **Activate Auto-Engage Lurker** (evaluates group every 20 minutes). |
+| `777` | - | Single Chat | **Activate Pal Mode** with default conversational persona. |
+| `777 <persona>` | - | Single Chat | **Activate Custom Persona** (e.g., `777 lust`, `777 sarcastic`, `777 poetic`). |
+| `000` | - | Single Chat | **Deactivate Pal Mode** for the current chat. |
+| `000 all` | - | Global | **Deactivate Pal Mode Globally** across all active chats. |
+| `777 engage` | - | Group Chat | **Activate Auto-Engage Lurker** (evaluates group every 20 minutes). |
 | `777 engage <min>` | - | Group Chat | **Activate Auto-Engage with custom interval** (e.g., `777 engage 45`). |
-| `777 engage off` | `!پراکنش خاموش` | Group Chat | **Disable Auto-Engage** in current group. |
+| `777 engage off` | - | Group Chat | **Disable Auto-Engage** in current group. |
 | `777 engage off all` | - | Global | **Disable Auto-Engage Globally** across all groups. |
-| `666` | `!دستیار روشن` | Global DMs | **Activate Universal Assistant** for all incoming private messages. |
-| `444` | `!سکوت` | Single Chat | **Mute Assistant** in this specific chat only (other DMs remain active). |
-| `444 all` | `!دستیار خاموش` | Global DMs | **Deactivate Assistant Globally** across all DMs. |
-| `111` (on reply) | `!بگو` | Reply Target | **Smart Reply**: Generates an intelligent, natural response to the quoted message. |
+| `666` | - | Global DMs | **Activate Universal Assistant** for all incoming private messages. |
+| `444` | - | Single Chat | **Mute Assistant** in this specific chat only (other DMs remain active). |
+| `444 all` / `444 کل` | - | Global DMs | **Deactivate Assistant Globally** across all DMs (both spellings accepted). |
+| `!مسدود` (on reply) | - | Single Chat | **Blacklist User (NEW)**: assistant never replies to this user again. Also accepts an ID: `!مسدود 123456`. |
+| `!آزاد` (on reply) | - | Single Chat | **Un-blacklist User (NEW)**. |
+| `111` (on reply) | - | Reply Target | **Smart Reply**: Generates an intelligent, natural response to the quoted message. |
 | `111 <prompt>` | - | Reply Target | **Directed Smart Reply**: Generates response following your instructions (e.g. `111 say I'm busy`). |
-| `333` | `!ریست` | Single Chat | **Reset Memory**: Clears short-term history and compressed long-term memory for this chat. |
+| `333` | - | Single Chat | **Reset Memory**: Clears short-term history and compressed long-term memory for this chat. |
 | `999` | `!پاکسازی` | Single Chat | **Ghost Purge All**: Deletes every message sent by you in this chat since the beginning of time. |
 | `999 <count>` | `!پاکسازی <تعداد>` | Single Chat | **Ghost Purge Last N**: Deletes your last `N` messages in this chat. |
 | `555` | `!وضعیت` | Single Chat | **Live Status**: Displays an active status dashboard and auto-deletes after 4 seconds. |
@@ -421,12 +432,34 @@ MODEL_NAME=gemini-3.5-flash-lite
 SESSION_NAME=ghostgram_session
 
 # =================================================================
+# ☁️ RAILWAY / CLOUD DEPLOYMENT (recommended for 24/7)
+# =================================================================
+# Run ONCE locally:  python3 gen_session_string.py
+# Put the printed string into the SESSION_STRING variable on Railway.
+SESSION_STRING=
+# Railway volume mount point (state files survive restarts)
+DATA_DIR=/app/data
+
+# =================================================================
+# 🔔 SILENT FEEDBACK & ERROR REPORTING (optional — defaults shown)
+# =================================================================
+STEALTH_CONFIRM=1
+CONFIRM_AUTO_DELETE_SECONDS=10
+NOTIFY_ERRORS=1
+
+# =================================================================
 # 🧠 MEMORY & BEHAVIOR TUNING
 # =================================================================
 SHORT_TERM_MEMORY_LIMIT=30
 LONG_TERM_SUMMARY_INTERVAL=30
 MAX_LONG_TERM_SUMMARY_CHARS=600
 MAX_MESSAGE_SEGMENT_CHARS=200
+
+# =================================================================
+# ⏱ GEMINI ENGINE TIMEOUTS (web search needs longer)
+# =================================================================
+GEMINI_TIMEOUT=15
+SEARCH_TIMEOUT=45
 
 # =================================================================
 # ⌨️ HUMAN TYPING SIMULATION
@@ -442,6 +475,12 @@ VPS_IP=your.vps.ip.here
 SSH_USER=root
 SSH_PORT=22
 ```
+
+### ☁️ Railway Deployment Checklist
+
+1. Create a **Volume** and attach it to the GhostGram service at `/app/data` — without it, memory, reminders, and Pal state are wiped on every restart.
+2. Set `API_ID`, `API_HASH`, `GEMINI_API_KEYS`, and `OWNER_ID` service variables.
+3. Run `python3 gen_session_string.py` on your own machine and paste the output into the `SESSION_STRING` variable — without it every container restart requires a fresh Telegram login code.
 
 ---
 

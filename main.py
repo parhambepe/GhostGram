@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone, timedelta
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.errors import MessageIdInvalidError, FloodWaitError
+from telethon.errors import MessageIdInvalidError, FloodWaitError, SessionPasswordNeededError
 from config import Config
 from text import Text
 from prompt import Prompt
@@ -19,6 +19,7 @@ from media_processor import media_processor
 from reminder_manager import reminder_manager
 from reminder_parser import reminder_parser, AI_PARSE_PROMPT, extract_json_block
 from health_server import start_health_server
+from notifier import notifier
 import random
 
 client = (
@@ -28,9 +29,24 @@ client = (
 )
 my_info = None
 
+
+async def safe_delete(event):
+    """Stealth-delete a command message; never raises."""
+    try:
+        await event.delete()
+    except Exception:
+        pass
+
+
+async def confirm(text: str):
+    """Stealth feedback: goes to Saved Messages and auto-deletes there."""
+    await notifier.confirm(text)
+
+
 def is_owner(event) -> bool:
     """Strict check to ensure commands only run for the owner (outgoing messages from this account)."""
     return bool(event and event.out)
+
 
 async def get_response(user_message: str, system_prompt: str = None, is_json: bool = False, parts=None, use_search: bool = False) -> str:
     if system_prompt is None:
@@ -59,27 +75,6 @@ async def get_recent_chat_history(chat_id: int, limit: int = None, include_id: b
         limit = Config.SHORT_TERM_MEMORY_LIMIT
     return await memory_manager.get_chat_history(client, chat_id, format_sender_name, my_id, limit=limit, include_id=include_id)
 
-async def get_reply_chain(message):
-    chain = []
-    current_msg = message
-    global my_info
-    my_id = my_info.id if my_info else Config.OWNER_ID
-    
-    while current_msg:
-        sender = await current_msg.get_sender()
-        name = await format_sender_name(sender, my_id)
-        text = current_msg.text or Text.NO_TEXT
-        time_str = current_msg.date.strftime("%Y-%m-%d %H:%M:%S")
-        
-        formatted_msg = Text.CHAIN_TEMPLATE.format(
-            time=time_str,
-            sender=name,
-            message=text
-        )
-        chain.append(formatted_msg)
-        current_msg = await current_msg.get_reply_message()
-    
-    return list(reversed(chain))
 
 # ==========================================================
 # 📜 COMMAND: راهنما / HELP (888)
@@ -107,11 +102,9 @@ async def pal_on_handler(event):
     chat_id = event.chat_id
     pal_manager.activate(chat_id, mode=mode)
     
-    # Instant stealth delete
-    try:
-        await event.delete()
-    except Exception:
-        pass
+    # Instant stealth delete + confirmation in Saved Messages
+    await safe_delete(event)
+    await confirm(f"🔮 رفیق ({mode.upper()} Mode) برای چت `{chat_id}` فعال شد.")
     print(f"🔮 Stealth Pal ({mode.upper()} Mode) ACTIVATED for chat {chat_id}")
 
 # ==========================================================
@@ -126,16 +119,15 @@ async def pal_off_handler(event):
     if scope_arg == "all":
         count = pal_manager.deactivate_all()
         print(f"💤 Stealth Pal DEACTIVATED globally for all {count} chats")
+        await confirm(f"💤 رفیق به‌صورت سراسری در {count} چت خاموش شد.")
     else:
         chat_id = event.chat_id
         pal_manager.deactivate(chat_id)
         print(f"💤 Stealth Pal DEACTIVATED for chat {chat_id}")
+        await confirm(f"💤 رفیق در چت `{chat_id}` خاموش شد.")
         
     # Instant stealth delete
-    try:
-        await event.delete()
-    except Exception:
-        pass
+    await safe_delete(event)
 
 # ==========================================================
 # 🕵️ COMMAND: پراکنش / تعامل خودکار (AUTO ENGAGE ON / 777 engage)
@@ -151,10 +143,8 @@ async def auto_engage_on_handler(event):
         duration = 1
     
     pal_manager.activate_auto_engage(chat_id, duration)
-    try:
-        await event.delete()
-    except Exception:
-        pass
+    await safe_delete(event)
+    await confirm(f"🕵️ Auto-Engage در چت `{chat_id}` فعال شد (هر ~{duration} دقیقه).")
     print(f"🕵️ Auto-Engage (Lurker) ACTIVATED for chat {chat_id} with duration {duration}m")
 
 # ==========================================================
@@ -169,15 +159,14 @@ async def auto_engage_off_handler(event):
     if scope == "all":
         count = pal_manager.deactivate_all_engages()
         print(f"🛑 Auto-Engage DEACTIVATED globally for all {count} chats")
+        await confirm(f"🛑 Auto-Engage سراسری در {count} چت خاموش شد.")
     else:
         chat_id = event.chat_id
         pal_manager.deactivate_auto_engage(chat_id)
-        print(f"🛑 Auto-Engage (Lurker) DEACTIVATED for chat {chat_id}")
+        print(f"🛑 Auto-Engage DEACTIVATED for chat {chat_id}")
+        await confirm(f"🛑 Auto-Engage در چت `{chat_id}` خاموش شد.")
         
-    try:
-        await event.delete()
-    except Exception:
-        pass
+    await safe_delete(event)
 
 # ==========================================================
 # 💼 COMMAND: روشن کردن دستیار شخصی (ASSISTANT ON / 666)
@@ -188,35 +177,65 @@ async def assistant_on_handler(event):
         return
     chat_id = event.chat_id
     assistant_manager.activate_global(chat_id=chat_id)
-    try:
-        await event.delete()
-    except Exception:
-        pass
+    await safe_delete(event)
+    await confirm("💼 دستیار شخصی برای تمام پیوی‌ها فعال شد.")
     print(f"💼 Universal Assistant Mode ACTIVATED for all DMs (un-muted {chat_id})")
 
 
 # ==========================================================
 # 🛑 COMMAND: خاموش کردن یا توقف دستیار شخصی (ASSISTANT OFF / 444)
 # ==========================================================
-@client.on(events.NewMessage(outgoing=True, pattern=r'^444(?:\s+(all))?$'))
+@client.on(events.NewMessage(outgoing=True, pattern=r'^444(?:\s+(\S+))?$'))
 async def assistant_off_handler(event):
     if not is_owner(event):
         return
     chat_id = event.chat_id
-    scope_arg = event.pattern_match.group(1)
+    scope_arg = (event.pattern_match.group(1) or "").strip().lower()
     
-    if scope_arg == "all":
+    if scope_arg in ("all", "کل", "همه", "همه‌چت‌ها"):
         assistant_manager.deactivate_global()
         print(f"🛑 Universal Assistant Mode DEACTIVATED globally for all DMs")
+        await confirm("🛑 دستیار شخصی در تمام چت‌ها خاموش شد.")
     else:
         # Default behavior: Stop assistant ONLY in this specific chat
         assistant_manager.mute_chat(chat_id)
         print(f"🤫 Assistant MUTED only in chat {chat_id} (All other DMs remain active)")
+        await confirm(f"🤫 دستیار فقط در چت `{chat_id}` متوقف شد (سایر پیوی‌ها فعال ماندند).")
         
-    try:
-        await event.delete()
-    except Exception:
-        pass
+    await safe_delete(event)
+
+# ==========================================================
+# 🚫 COMMAND: لیست سیاه دستیار (!مسدود / !آزاد روی پیام مخاطب)
+# ==========================================================
+@client.on(events.NewMessage(outgoing=True, pattern=r'^!(مسدود|آزاد|blacklist|unblock)\b'))
+async def blacklist_handler(event):
+    if not is_owner(event):
+        return
+    action = event.pattern_match.group(1)
+    target_user_id = None
+
+    reply_msg = await event.get_reply_message() if event.is_reply else None
+    if reply_msg and reply_msg.sender_id:
+        target_user_id = reply_msg.sender_id
+    else:
+        # Allow explicit ID: !مسدود 123456
+        m = re.search(r'\d{4,}', event.raw_text or "")
+        if m:
+            target_user_id = int(m.group(0))
+
+    await safe_delete(event)
+    if not target_user_id:
+        await confirm("⚠️ روی پیام مخاطب ریپلای کن یا ID بده: `!مسدود 123456`")
+        return
+
+    if action in ("مسدود", "blacklist"):
+        assistant_manager.blacklist_add(target_user_id)
+        print(f"🚫 Blacklisted user {target_user_id}")
+        await confirm(Text.BLACKLIST_ADDED.format(user_id=target_user_id))
+    else:
+        assistant_manager.blacklist_remove(target_user_id)
+        print(f"✅ Un-blacklisted user {target_user_id}")
+        await confirm(Text.BLACKLIST_REMOVED.format(user_id=target_user_id))
 
 # ==========================================================
 # 📊 COMMAND: وضعیت (STATUS / 555)
@@ -241,13 +260,15 @@ async def status_handler(event):
     else:
         ast_status = "⚪ **دستیار شخصی (666):** **غیرفعال** است."
     
+    bl_note = f"\n🚫 تعداد کاربران مسدود: `{len(assistant_manager.blacklist)}`" if assistant_manager.blacklist else ""
+    
     report = (
         f"📊 **گزارش وضعیت هوش مصنوعی:**\n\n"
         f"{pal_status}\n"
         f"📱 تعداد چت‌های فعال برای رفیق (777): `{pal_count}`\n\n"
         f"{engage_status}\n"
         f"🕵️ تعداد چت‌های فعال تعامل خودکار (engage): `{engage_count}`\n\n"
-        f"{ast_status}"
+        f"{ast_status}{bl_note}"
     )
     msg = await event.edit(report)
     await asyncio.sleep(4)
@@ -255,8 +276,6 @@ async def status_handler(event):
         await msg.delete()
     except Exception:
         pass
-
-
 
 
 # ==========================================================
@@ -269,10 +288,8 @@ async def reset_memory_handler(event):
     chat_id = event.chat_id
     memory_manager.reset_chat_memory(chat_id)
     # Instant stealth delete
-    try:
-        await event.delete()
-    except Exception:
-        pass
+    await safe_delete(event)
+    await confirm(f"🧠 حافظه چت `{chat_id}` ریست شد.")
     print(f"🧠 Short-term memory RESET for chat {chat_id}")
 
 # ==========================================================
@@ -289,10 +306,7 @@ async def purge_handler(event):
     
     # Instant delete trigger message for stealth
     trigger_id = event.id
-    try:
-        await event.delete()
-    except Exception:
-        pass
+    await safe_delete(event)
     
     global my_info
     my_id = my_info.id if my_info else (await client.get_me()).id
@@ -323,44 +337,44 @@ async def purge_handler(event):
             
             # Delete in batches of 50
             if len(message_ids) >= 50:
-                try:
-                    await client.delete_messages(input_chat, message_ids, revoke=True)
-                    deleted_count += len(message_ids)
-                except FloodWaitError as e:
-                    await asyncio.sleep(e.seconds + 1)
-                    await client.delete_messages(input_chat, message_ids, revoke=True)
-                    deleted_count += len(message_ids)
-                except Exception as ex:
-                    # If batch failed (e.g. contains message older than 48h in non-admin group), try individually
-                    for mid in message_ids:
-                        try:
-                            await client.delete_messages(input_chat, [mid], revoke=True)
-                            deleted_count += 1
-                        except Exception:
-                            pass
+                deleted_count += await _delete_batch(input_chat, message_ids)
                 message_ids = []
                 await asyncio.sleep(0.2)
         
         # Delete remaining messages
         if message_ids:
-            try:
-                await client.delete_messages(input_chat, message_ids, revoke=True)
-                deleted_count += len(message_ids)
-            except FloodWaitError as e:
-                await asyncio.sleep(e.seconds + 1)
-                await client.delete_messages(input_chat, message_ids, revoke=True)
-                deleted_count += len(message_ids)
-            except Exception as ex:
-                for mid in message_ids:
-                    try:
-                        await client.delete_messages(input_chat, [mid], revoke=True)
-                        deleted_count += 1
-                    except Exception:
-                        pass
+            deleted_count += await _delete_batch(input_chat, message_ids)
             
         print(f"🧹 Stealth Purged {deleted_count} messages from chat {chat_id}")
+        await confirm(f"🧹 {deleted_count} پیام شما در این چت پاکسازی شد.")
     except Exception as e:
         print(f"⚠️ Purge error in chat {chat_id}: {e}")
+        await notifier.error("purge", str(e))
+
+
+async def _delete_batch(input_chat, message_ids) -> int:
+    """Deletes a batch of messages handling FloodWait, falls back to one-by-one."""
+    try:
+        await client.delete_messages(input_chat, message_ids, revoke=True)
+        return len(message_ids)
+    except FloodWaitError as e:
+        await asyncio.sleep(min(e.seconds + 1, 120))
+        try:
+            await client.delete_messages(input_chat, message_ids, revoke=True)
+            return len(message_ids)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    # Batch failed → delete individually (e.g. >48h old in non-admin groups)
+    count = 0
+    for mid in message_ids:
+        try:
+            await client.delete_messages(input_chat, [mid], revoke=True)
+            count += 1
+        except Exception:
+            pass
+    return count
 
 # ==========================================================
 # 💬 COMMAND: پاسخ هوشمند سفارشی (SMART SPEAK / 111)
@@ -375,10 +389,7 @@ async def custom_ask_handler(event):
     chat_id = event.chat_id
     
     # Delete the command message instantly to keep it stealth
-    try:
-        await event.delete()
-    except Exception:
-        pass
+    await safe_delete(event)
     
     if not user_instruction and not reply_to_id:
         return
@@ -404,7 +415,8 @@ async def custom_ask_handler(event):
         history_text=history_text,
         sender=sender_name,
         target_text=target_text or "گفت‌وگوی جاری",
-        user_instruction=user_instruction or "پاسخ طبیعی، خودمونی و مناسب بده."
+        user_instruction=user_instruction or "پاسخ طبیعی، خودمونی و مناسب بده.",
+        persona_name=Config.PERSONA_NAME
     )
     
     input_chat = await event.get_input_chat()
@@ -414,9 +426,12 @@ async def custom_ask_handler(event):
             human_typing_time = calculate_human_typing_delay(response)
             await asyncio.sleep(human_typing_time)
             await client.send_message(input_chat, response, reply_to=reply_to_id)
-            print(f"⚡ Handled 111 / !بگو in chat {chat_id}")
+            print(f"⚡ Handled 111 in chat {chat_id}")
             # Record message for rolling long-term memory summary check
             memory_manager.record_message_and_check_summary(client, chat_id, gemini, format_sender_name, my_info.id if my_info else Config.OWNER_ID)
+        else:
+            await notifier.error("111", "پاسخ AI دریافت نشد")
+
 
 # ==========================================================
 # 🚀 INCOMING: پردازش پیام‌های دریافتی (PAL & ASSISTANT MODES)
@@ -450,6 +465,10 @@ async def incoming_message_handler(event):
     except Exception:
         pass
 
+    # 🚫 Assistant blacklist: this user must never receive automated replies
+    if assistant_manager.is_blacklisted(event.sender_id):
+        return
+
     # Determine active mode: Pal Mode has precedence for specifically activated chats
     if pal_manager.is_active(chat_id):
         mode = "pal"
@@ -474,7 +493,7 @@ async def incoming_message_handler(event):
             is_mentioned = True
         if my_info and my_info.first_name and my_info.first_name.lower() in raw_lower:
             is_mentioned = True
-        if "شایان" in raw_lower or "shayan" in raw_lower:
+        if Config.PERSONA_NAME and Config.PERSONA_NAME in (event.raw_text or ""):
             is_mentioned = True
                 
         # If it's a group, only reply if directly addressed or explicitly mentioned/replied
@@ -484,16 +503,23 @@ async def incoming_message_handler(event):
     # Check incoming content
     incoming_text = event.text or ""
     
-    # 👁️🎙️ Media support: photos & voice notes are understood even without caption
+    # 👁️🎙️🎬 Media support: photos, voice notes & video notes are understood even without caption
     media_part = None
-    if getattr(event, "photo", None) or getattr(event, "voice", None) or getattr(event, "audio", None):
+    has_supported_media = bool(
+        getattr(event, "photo", None)
+        or getattr(event, "voice", None)
+        or getattr(event, "audio", None)
+        or getattr(event, "video", None)
+        or getattr(event, "video_note", None)
+    )
+    if has_supported_media:
         media_part = await media_processor.build_part(client, event)
         if media_part is None:
-            # Media exists but download failed → treat as text-only message
+            # Media exists but download failed/unsupported → treat as text-only message
             if not incoming_text.strip():
                 return
     elif not incoming_text.strip():
-        # Other media types (stickers, video, files...) without caption → skip
+        # Other media types (stickers, files...) without caption → skip
         return
 
     media_note = ""
@@ -546,7 +572,8 @@ async def incoming_message_handler(event):
                     long_term_context=ltm_context,
                     history_text=history_text,
                     sender=sender_name,
-                    target_text=(media_note + incoming_text) if media_note else incoming_text
+                    target_text=(media_note + incoming_text) if media_note else incoming_text,
+                    persona_name=Config.PERSONA_NAME
                 )
                 system_prompt = persona_manager.get_prompt(pal_variant)
                 print(f"🤖 Pal Autopilot ({pal_variant.upper()}) thinking & typing for chat {chat_id} (from {sender_name})...")
@@ -556,12 +583,13 @@ async def incoming_message_handler(event):
                     long_term_context=ltm_context,
                     history_text=history_text,
                     sender=sender_name,
-                    target_text=(media_note + incoming_text) if media_note else incoming_text
+                    target_text=(media_note + incoming_text) if media_note else incoming_text,
+                    persona_name=Config.PERSONA_NAME
                 )
                 system_prompt = persona_manager.get_prompt("assistant")
                 print(f"💼 Personal Assistant thinking & typing for chat {chat_id} (from {sender_name})...")
             
-            # Pass the photo/voice bytes alongside the prompt when present
+            # Pass the photo/voice/video bytes alongside the prompt when present
             parts = [media_part] if media_part is not None else None
             response = await get_response(prompt_input, system_prompt, parts=parts)
             
@@ -570,7 +598,11 @@ async def incoming_message_handler(event):
                 await asyncio.sleep(human_typing_time)
                 
                 reply_target = event.id if (event.is_group or event.is_channel) else None
-                await client.send_message(input_chat, response, reply_to=reply_target)
+                try:
+                    await client.send_message(input_chat, response, reply_to=reply_target)
+                except FloodWaitError as e:
+                    await asyncio.sleep(min(e.seconds + 1, 300))
+                    await client.send_message(input_chat, response, reply_to=reply_target)
                 if mode == "pal":
                     print(f"✅ Pal replied naturally in chat {chat_id}")
                 else:
@@ -578,6 +610,9 @@ async def incoming_message_handler(event):
                     
                 # Record message for rolling long-term memory summary check
                 memory_manager.record_message_and_check_summary(client, chat_id, gemini, format_sender_name, my_id)
+            elif response == Text.ERROR:
+                print(f"⚠️ AI error for chat {chat_id}; notifying owner")
+                await notifier.error("auto-reply", f"پاسخ هوش مصنوعی برای چت {chat_id} ناموفق بود")
 
 
 # ==========================================================
@@ -596,10 +631,7 @@ async def catchup_summary_handler(event):
         hours = 72
     chat_id = event.chat_id
 
-    try:
-        await event.delete()
-    except Exception:
-        pass
+    await safe_delete(event)
 
     global my_info
     my_id = my_info.id if my_info else Config.OWNER_ID
@@ -628,15 +660,12 @@ async def catchup_summary_handler(event):
 
     history_text = "\n".join(reversed(lines))
     now_persian = get_current_persian_datetime()
-    prompt = f"""[زمان فعلی: {now_persian}]
-گفتگوی گروه در {hours} ساعت گذشته:
-{history_text}
-
-شما شایان هستید و به‌تازگی به این گفتگو برگشته‌اید. یک خلاصه روان و خودمونی از اتفاقاتی که از دست داده‌اید بنویسید:
-۱. چه خبر بوده و چه بحث‌هایی شده (۲ تا ۴ خط)
-۲. اگر تصمیم یا توافقی شده بود بگو
-۳. اگر کسی مستقیماً از شما سؤالی پرسیده یا منتظر جواب بود، آخر خلاصه با «⚠️ نیاز به پاسخ:» اشاره کن
-خودمونی، بدون ایموجی، حداکثر ۶ خط."""
+    prompt = Prompt.CATCHUP_TEMPLATE.format(
+        current_time=now_persian,
+        hours=hours,
+        history_text=history_text,
+        persona_name=Config.PERSONA_NAME
+    )
 
     system_prompt = persona_manager.get_prompt("normal")
     status = await client.send_message(input_chat, "در حال جمع‌بندی گفتگو...")
@@ -649,6 +678,8 @@ async def catchup_summary_handler(event):
     if summary and summary != Text.ERROR:
         await client.send_message(input_chat, f"📋 خلاصه {hours} ساعت اخیر:\n\n{summary}")
         print(f"📋 Catch-up summary sent for chat {chat_id} ({len(lines)} msgs)")
+    else:
+        await notifier.error("222", "خلاصه‌سازی گفتگو ناموفق بود")
 
 # ==========================================================
 # 🌐 COMMAND: جستجوی وب (WEB SEARCH / 112)
@@ -661,10 +692,7 @@ async def web_search_handler(event):
     chat_id = event.chat_id
     reply_to_id = event.reply_to_msg_id
 
-    try:
-        await event.delete()
-    except Exception:
-        pass
+    await safe_delete(event)
 
     if not query:
         return
@@ -698,6 +726,7 @@ async def web_search_handler(event):
             print(f"🌐 Web answer sent in chat {chat_id}")
         else:
             print(f"⚠️ Web search failed for chat {chat_id}")
+            await notifier.error("112", f"جستجوی وب ناموفق بود: {query[:80]}")
 
 # ==========================================================
 # ⏰ COMMAND: یادآور هوشمند (SMART REMINDER / 555 <دستور>)
@@ -709,10 +738,7 @@ async def smart_reminder_handler(event):
     instruction = (event.pattern_match.group(1) or "").strip()
     chat_id = event.chat_id
 
-    try:
-        await event.delete()
-    except Exception:
-        pass
+    await safe_delete(event)
     if not instruction:
         return
 
@@ -759,8 +785,17 @@ async def reminder_loop():
                     input_chat = await client.get_input_entity(r["chat_id"])
                     await client.send_message(input_chat, f"⏰ یادآوری: {r['text']}")
                     print(f"⏰ Reminder fired for chat {r['chat_id']}: {r['text'][:50]}")
+                except FloodWaitError as e:
+                    await asyncio.sleep(min(e.seconds + 1, 300))
+                    try:
+                        input_chat = await client.get_input_entity(r["chat_id"])
+                        await client.send_message(input_chat, f"⏰ یادآوری: {r['text']}")
+                    except Exception as e2:
+                        print(f"⚠️ Reminder delivery failed after floodwait: {e2}")
+                        await notifier.error("reminder", str(e2))
                 except Exception as e:
                     print(f"⚠️ Reminder delivery failed: {e}")
+                    await notifier.error("reminder", str(e))
         except Exception as e:
             print(f"⚠️ Reminder Loop Error: {e}")
             await asyncio.sleep(30)
@@ -830,7 +865,8 @@ async def auto_engage_loop():
                         current_time=now_persian,
                         long_term_context=ltm_context,
                         history_text=history_text,
-                        duration_minutes=duration_minutes
+                        duration_minutes=duration_minutes,
+                        persona_name=Config.PERSONA_NAME
                     )
                     
                     response = await get_response(prompt_input, persona_manager.get_prompt("normal"), is_json=True)
@@ -865,12 +901,15 @@ async def auto_engage_loop():
                                     print(f"⚠️ AI tried to reply to its own message ({target_id}). Ignoring!")
                                     continue
                                 
-                                # Prevent the AI from replying to other bots!
+                                # Prevent the AI from replying to other bots or blacklisted users!
                                 if target_msg:
                                     try:
                                         target_sender = await target_msg.get_sender()
                                         if target_sender and getattr(target_sender, 'bot', False):
                                             print(f"⚠️ AI tried to reply to a bot ({target_id}). Ignoring!")
+                                            continue
+                                        if target_sender and assistant_manager.is_blacklisted(target_sender.id):
+                                            print(f"⚠️ Auto-engage skipped blacklisted user ({target_id}).")
                                             continue
                                     except Exception:
                                         pass
@@ -897,9 +936,27 @@ async def auto_engage_loop():
 # ==========================================================
 def main():
     global my_info
+
+    # Fail fast on missing credentials instead of hanging on interactive login
+    if not Config.SESSION_STRING and (not Config.API_ID or not Config.API_HASH):
+        print("❌ API_ID/API_HASH تنظیم نشده است. در Railway حتماً SESSION_STRING ست کنید.")
+        raise SystemExit(1)
+    if Config.SESSION_STRING and (not Config.API_ID or not Config.API_HASH):
+        print("❌ حتی با SESSION_STRING هم API_ID و API_HASH لازم است.")
+        raise SystemExit(1)
+
     start_health_server()  # Railway: keep an HTTP port open so the container stays healthy
-    client.start()
+    try:
+        client.start()
+    except SessionPasswordNeededError:
+        print("❌ حساب دو مرحله‌ای دارد؛ SESSION_STRING باید با تأیید رمز ساخته شود (gen_session_string.py).")
+        raise SystemExit(1)
+    except RuntimeError as e:
+        print(f"❌ لاگین تلگرام ناموفق: {e}")
+        print("   راه‌حل: لوکال «python3 gen_session_string.py» را اجرا کنید و خروجی را در SESSION_STRING بگذارید.")
+        raise SystemExit(1)
     my_info = client.loop.run_until_complete(client.get_me())
+    notifier.bind(client, my_info)
     
     # Start background loops
     client.loop.create_task(auto_engage_loop())
@@ -909,16 +966,16 @@ def main():
     print(f"👻 GhostGram (روح‌گرام) is ONLINE & READY!")
     print(f"👤 Logged in as: {my_info.first_name} (@{my_info.username}) [ID: {my_info.id}]")
     print(f"🧠 Model: {Config.MODEL_NAME}")
+    print(f"💾 Data dir: {Config.PAL_STATE_FILE.rsplit('/', 1)[0] if '/' in Config.PAL_STATE_FILE else '(cwd)'}")
     print(f"📱 Active Pal Chats (777): {pal_manager.get_active_count()}")
     print(f"🕵️ Auto-Engage Chats (777 engage): {pal_manager.get_auto_engage_count()}")
     print(f"💼 Assistant Mode (666): {'ON (All DMs)' if assistant_manager.dm_enabled else 'OFF'}")
     pending_rem = len(reminder_manager.list_pending())
     print(f"⏰ Pending reminders: {pending_rem}")
-    print("🚀 Listening for secret codes (777, 777 engage, 666, 444, 555 <یادآور>, 333, 999, 222 خلاصه, 112 جستجو, 111, 888)...")
+    print("🚀 Listening for secret codes (777, 777 engage, 666, 444, 555 <یادآور>, 333, 999, 222 خلاصه, 112 جستجو, 111, 888, !مسدود)...")
     print("=" * 50)
     
     client.run_until_disconnected()
 
 if __name__ == '__main__':
     main()
-

@@ -3,6 +3,8 @@ import json
 import os
 from datetime import datetime, timezone, timedelta
 
+from config import Config
+
 class ReminderManager:
     """
     Natural-language reminders.
@@ -10,8 +12,8 @@ class ReminderManager:
     (time in Iran local time). Reminders fire via a background loop and are
     delivered to the chat the reminder was created in.
     """
-    def __init__(self, state_file="reminders_state.json"):
-        self.state_file = state_file
+    def __init__(self, state_file=None):
+        self.state_file = state_file or Config.REMINDERS_STATE_FILE
         self.reminders = {}  # id -> {chat_id, due_ts, text, created}
         self._next_id = 1
         self.load_state()

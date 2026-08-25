@@ -9,7 +9,8 @@ class AssistantManager:
         self.state_file = state_file
         self.dm_enabled = True       # By default, when Assistant mode is on, handles all DMs
         self.active_chats = set()    # Specific group IDs where assistant is explicitly enabled
-        self.muted_chats = set()     # Specific chat IDs where assistant is temporarily paused/muted by Shayan
+        self.muted_chats = set()     # Specific chat IDs where assistant is temporarily paused/muted by owner
+        self.blacklist = set()       # User IDs the assistant must NEVER talk to (blocklist)
         self._locks = {}
         self.load_state()
 
@@ -23,6 +24,7 @@ class AssistantManager:
                         self.dm_enabled = bool(data.get("dm_enabled", True))
                         self.active_chats = set(data.get("active_chats", []))
                         self.muted_chats = set(data.get("muted_chats", []))
+                        self.blacklist = set(int(x) for x in data.get("blacklist", []))
                     elif isinstance(data, list):
                         self.active_chats = set(data)
                         self.dm_enabled = True
@@ -32,10 +34,12 @@ class AssistantManager:
                 self.dm_enabled = True
                 self.active_chats = set()
                 self.muted_chats = set()
+                self.blacklist = set()
         else:
             self.dm_enabled = True
             self.active_chats = set()
             self.muted_chats = set()
+            self.blacklist = set()
 
     def save_state(self):
         """Persists assistant state to disk atomically."""
@@ -43,7 +47,8 @@ class AssistantManager:
             data = {
                 "dm_enabled": self.dm_enabled,
                 "active_chats": list(self.active_chats),
-                "muted_chats": list(self.muted_chats)
+                "muted_chats": list(self.muted_chats),
+                "blacklist": [str(x) for x in self.blacklist],
             }
             tmp_file = f"{self.state_file}.tmp"
             with open(tmp_file, "w", encoding="utf-8") as f:
@@ -64,8 +69,26 @@ class AssistantManager:
             return False
         return self.dm_enabled
 
+    def is_blacklisted(self, user_id) -> bool:
+        """True if this user must never receive assistant replies."""
+        try:
+            return int(user_id) in self.blacklist
+        except (TypeError, ValueError):
+            return False
+
+    def blacklist_add(self, chat_id: int):
+        self.blacklist.add(int(chat_id))
+        # Also mute so the current chat goes quiet immediately
+        self.muted_chats.add(int(chat_id))
+        self.save_state()
+
+    def blacklist_remove(self, chat_id: int):
+        self.blacklist.discard(int(chat_id))
+        self.muted_chats.discard(int(chat_id))
+        self.save_state()
+
     def mute_chat(self, chat_id: int):
-        """Mutes/stops Assistant ONLY in this chat so Shayan can talk, while keeping other DMs active."""
+        """Mutes/stops Assistant ONLY in this chat so the owner can talk, while keeping other DMs active."""
         chat_id = int(chat_id)
         self.muted_chats.add(chat_id)
         self.save_state()
@@ -88,9 +111,6 @@ class AssistantManager:
         self.save_state()
         return True
 
-
-
-
     def calculate_typing_delay(self, text: str) -> float:
         """Calculates a realistic typing duration based on text length and punctuation."""
         from typing_helper import calculate_human_typing_delay
@@ -103,7 +123,7 @@ class AssistantManager:
         text = text.strip()
         from typing_helper import ContinuousTyping, calculate_human_typing_delay
         typing_delay = calculate_human_typing_delay(text)
-        
+
         async with ContinuousTyping(client, chat_id):
             await asyncio.sleep(typing_delay)
             if reply_to:
@@ -113,4 +133,3 @@ class AssistantManager:
 
 # Global singleton instance
 assistant_manager = AssistantManager()
-

@@ -3,9 +3,11 @@ import os
 import time
 from datetime import datetime, timezone
 
+from config import Config
+
 class APIUsageTracker:
-    def __init__(self, filename="api_usage.json"):
-        self.filename = filename
+    def __init__(self, filename=None):
+        self.filename = filename or Config.API_USAGE_FILE
         self.limit = 490  # 10 requests safety buffer below Google's 500 limit
         self.rpm_limit = 15 # Google's 15 requests per minute limit per key
         

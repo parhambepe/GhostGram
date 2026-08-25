@@ -8,6 +8,15 @@ from google.genai import types
 from config import Config
 from text import Text
 
+try:
+    from telethon.errors import FloodWaitError
+except Exception:  # pragma: no cover - telethon always present in prod, guard anyway
+    class FloodWaitError(Exception):
+        @property
+        def seconds(self):
+            return 5
+
+
 class GeminiEngine:
     # Retry policy: after ALL keys fail, retry the whole cycle at most this many times.
     MAX_GLOBAL_RETRIES = 3
@@ -30,7 +39,7 @@ class GeminiEngine:
     def _client(self, api_key: str):
         """
         Return a cached, REUSED genai.Client for this key.
-        We also inject a strict 15.0s timeout at the HTTP level.
+        We also inject a strict timeout at the HTTP level.
         """
         with self._client_lock:
             c = self._clients.get(api_key)
@@ -76,16 +85,19 @@ class GeminiEngine:
                            parts=None, use_search: bool = False) -> str:
         """
         Asynchronously fetches a response using Round-Robin key management,
-        a hard 15-second timeout per key attempt and a FINITE global retry cap.
+        a hard per-attempt timeout and a FINITE global retry cap.
 
         - `parts`: optional list of google.genai types.Part (e.g. images/audio) appended to the prompt.
-        - `use_search`: enables Google Search grounding for real-time information.
+        - `use_search`: enables Google Search grounding for real-time information
+          (gets a longer timeout via SEARCH_TIMEOUT — grounded calls are slow).
         """
         # ==========================================
         # 🛡️ PRE-FLIGHT SAFETY SANITIZER
         # ==========================================
         safe_user_msg = self._sanitize(user_message or "")
         safe_sys_prompt = self._sanitize(system_prompt or "")
+
+        timeout = Config.SEARCH_TIMEOUT if use_search else Config.GEMINI_TIMEOUT
 
         # Hard payload size limit (keep head+tail when truncating)
         MAX_CHARS = 50000
@@ -135,7 +147,6 @@ class GeminiEngine:
 
                         if not api_key:
                             print("🚫 ALL API KEYS EXHAUSTED FOR TODAY! Dropping message.")
-                            from text import Text
                             return Text.ERROR
 
                         client = self._client(api_key)
@@ -145,25 +156,32 @@ class GeminiEngine:
                             from api_tracker import api_tracker
                             api_tracker.record_usage(api_key)
 
-                            # 15-Second Hard Timeout
+                            # Hard Timeout (longer for web-search grounded calls)
                             resp = await asyncio.wait_for(
                                 loop.run_in_executor(
                                     None,
                                     lambda c=client, m=self.model, cont=contents, conf=cfg: c.models.generate_content(model=m, contents=cont, config=conf)
                                 ),
-                                timeout=15.0
+                                timeout=timeout
                             )
 
                             # Success! Reset circuit breaker
-                            from api_tracker import api_tracker
                             api_tracker.record_success(api_key)
                             break  # Success! Exit the round-robin loop
 
                         except asyncio.TimeoutError:
                             from api_tracker import api_tracker
                             api_tracker.record_error(api_key)
-                            last_err = Exception("15-second strict timeout reached")
-                            print(f"⚠️ Key timeout (15s). Moving to next key in cycle...")
+                            last_err = Exception(f"{timeout}s strict timeout reached")
+                            print(f"⚠️ Key timeout ({timeout}s). Moving to next key in cycle...")
+                            continue
+                        except FloodWaitError as e:
+                            from api_tracker import api_tracker
+                            api_tracker.record_error(api_key)
+                            last_err = e
+                            wait_s = min(int(getattr(e, "seconds", 10) or 10), 60)
+                            print(f"⏳ FloodWait {wait_s}s before next key attempt...")
+                            await asyncio.sleep(wait_s)
                             continue
                         except Exception as e:
                             last_err = e
@@ -181,14 +199,12 @@ class GeminiEngine:
                         await asyncio.sleep(self.RETRY_SLEEP_SECONDS)
                     else:
                         print(f"🚫 Giving up after {self.MAX_GLOBAL_RETRIES} full cycles. Last error: {last_err}")
-                        from text import Text
                         return Text.ERROR
 
             raw_text = (resp.text or "").strip()
             return self._clean_output(raw_text)
 
         except Exception as e:
-            from text import Text
             print(f"Error in GeminiEngine: {str(e)}")
             return Text.ERROR
 

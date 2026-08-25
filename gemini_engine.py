@@ -185,6 +185,13 @@ class GeminiEngine:
                             continue
                         except Exception as e:
                             last_err = e
+                            err_str = str(e)
+                            # 400 INVALID_ARGUMENT on media (e.g. undecodable image) will never
+                            # succeed by retrying the same payload — fail fast instead of
+                            # burning retries and tripping the circuit breaker.
+                            if "400 INVALID_ARGUMENT" in err_str or ("INVALID_ARGUMENT" in err_str and "Unable to process input image" in err_str):
+                                print(f"🚫 Permanent input error (bad/undecodable media). Dropping request: {err_str[:160]}")
+                                return Text.ERROR
                             from api_tracker import api_tracker
                             api_tracker.record_error(api_key)
                             print(f"⚠️ Key/Network Error ({type(e).__name__}). Moving to next key in cycle: {e}")

@@ -48,11 +48,16 @@ class StickerManager:
 
     # ---------------- helpers ----------------
     @staticmethod
-    def sticker_info(message):
-        """Extract (file_unique_id, emoji) from a sticker message. Returns (None, None) if not a sticker."""
+    def sticker_key(message):
+        """Extract (stable_key, emoji, kind) from a sticker message. Returns (None, None, None) if not a sticker.
+
+        Telethon Documents have NO file_unique_id (Bot-API concept), so we build a
+        stable composite key from id+access_hash — the same sticker always carries
+        the same pair across chats/sessions.
+        """
         doc = getattr(message, "sticker", None)
         if doc is None:
-            return None, None
+            return None, None, None
         emoji = ""
         mime = getattr(doc, "mime_type", "") or ""
         animated = bool(getattr(doc, "animated", False))
@@ -63,7 +68,16 @@ class StickerManager:
                 emoji = getattr(attr, "alt", "") or ""
                 break
         kind = "tgs" if animated else ("webm" if video else "webp")
-        return getattr(doc, "file_unique_id", None), {"emoji": emoji, "kind": kind}
+        key = f"{getattr(doc, 'id', '')}-{getattr(doc, 'access_hash', '')}"
+        if key == "-":
+            return None, None, None
+        return key, {"emoji": emoji, "kind": kind}, None
+
+    # Backwards-compatible shim: returns (key, info) like before
+    @classmethod
+    def sticker_info(cls, message):
+        key, info, _ = cls.sticker_key(message)
+        return key, info
 
     def teach(self, message, meaning: str):
         """Teach the meaning of the sticker in `message`. Returns True if newly taught."""
@@ -150,7 +164,7 @@ class StickerManager:
         return await asyncio.get_event_loop().run_in_executor(None, self._resolve_document, client, fid)
 
     def _resolve_document(self, client, fid):
-        """Resolve file_unique_id back to a cached Document (populated by remember_document)."""
+        """Resolve stored key back to a cached Document (populated by remember_document)."""
         if not fid:
             return None
         cache = getattr(client, "_gg_sticker_docs", None)
@@ -163,14 +177,14 @@ class StickerManager:
         doc = getattr(message, "sticker", None)
         if doc is None:
             return
-        fid = getattr(doc, "file_unique_id", None)
-        if not fid:
+        key = f"{getattr(doc, 'id', '')}-{getattr(doc, 'access_hash', '')}"
+        if key == "-":
             return
         cache = getattr(client, "_gg_sticker_docs", None)
         if cache is None:
             cache = {}
             setattr(client, "_gg_sticker_docs", cache)
-        cache[fid] = doc
+        cache[key] = doc
 
 
 # Global singleton

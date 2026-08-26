@@ -3,6 +3,7 @@ import time
 import re
 import html
 import asyncio
+import os
 from google import genai
 from google.genai import types
 from config import Config
@@ -29,12 +30,19 @@ class GeminiEngine:
         self._clients = {}
         self._client_lock = threading.Lock()
         self.model = Config.MODEL_NAME
+        # 🔎 Web-search fallback model: the `google_search` grounding tool is NOT
+        # supported on *-flash-lite models. When use_search=True we temporarily
+        # route the call through this search-capable model, then return to self.model.
+        # Override via SEARCH_MODEL_NAME env if your account uses a different gen.
+        self.search_model = os.getenv("SEARCH_MODEL_NAME", "gemini-2.5-flash")
 
         # Round-Robin State
         self.current_key_idx = 0
         self._idx_lock = threading.Lock()
         # Global request queue lock (lazily bound to the running loop on first use)
         self._queue_lock = None
+        # Last error captured (for downstream diagnostics, e.g. web-search failures)
+        self._last_error = None
 
     def _client(self, api_key: str):
         """
@@ -102,6 +110,12 @@ class GeminiEngine:
 
         timeout = Config.SEARCH_TIMEOUT if use_search else Config.GEMINI_TIMEOUT
 
+        # 🔎 When web-search grounding is requested, route through a search-capable
+        # model (the configured default might be a *-flash-lite that rejects the tool).
+        effective_model = self.search_model if use_search else self.model
+        if use_search and effective_model != self.model:
+            print(f"🔎 Web-search: routing through '{effective_model}' (default '{self.model}' lacks google_search tool)")
+
         # Hard payload size limit (keep head+tail when truncating)
         MAX_CHARS = 50000
         if len(safe_user_msg) > MAX_CHARS:
@@ -163,7 +177,7 @@ class GeminiEngine:
                             resp = await asyncio.wait_for(
                                 loop.run_in_executor(
                                     None,
-                                    lambda c=client, m=self.model, cont=contents, conf=cfg: c.models.generate_content(model=m, contents=cont, config=conf)
+                                    lambda c=client, m=effective_model, cont=contents, conf=cfg: c.models.generate_content(model=m, contents=cont, config=conf)
                                 ),
                                 timeout=timeout
                             )
@@ -176,18 +190,21 @@ class GeminiEngine:
                             from api_tracker import api_tracker
                             api_tracker.record_error(api_key)
                             last_err = Exception(f"{timeout}s strict timeout reached")
+                            self._last_error = last_err
                             print(f"⚠️ Key timeout ({timeout}s). Moving to next key in cycle...")
                             continue
                         except FloodWaitError as e:
                             from api_tracker import api_tracker
                             api_tracker.record_error(api_key)
                             last_err = e
+                            self._last_error = e
                             wait_s = min(int(getattr(e, "seconds", 10) or 10), 60)
                             print(f"⏳ FloodWait {wait_s}s before next key attempt...")
                             await asyncio.sleep(wait_s)
                             continue
                         except Exception as e:
                             last_err = e
+                            self._last_error = e
                             err_str = str(e)
                             # 400 INVALID_ARGUMENT on media (e.g. undecodable image) will never
                             # succeed by retrying the same payload — fail fast instead of
@@ -216,6 +233,7 @@ class GeminiEngine:
 
         except Exception as e:
             print(f"Error in GeminiEngine: {str(e)}")
+            self._last_error = e
             return Text.ERROR
 
 # Global singleton instance

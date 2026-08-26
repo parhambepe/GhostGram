@@ -853,8 +853,12 @@ async def web_search_handler(event):
             await client.send_message(input_chat, response, reply_to=reply_to_id)
             print(f"🌐 Web answer sent in chat {chat_id}")
         else:
+            # DEBUG: capture the real underlying error so we can see WHY web search failed
+            last_err = getattr(gemini, "_last_error", None)
+            err_detail = str(last_err) if last_err else "unknown (response was Text.ERROR or empty)"
             print(f"⚠️ Web search failed for chat {chat_id}")
-            await notifier.error("112", f"جستجوی وب ناموفق بود: {query[:80]}")
+            print(f"⚠️ WEB-SEARCH-DEBUG: model={getattr(gemini,'model',None)} use_search=True last_error={err_detail[:500]}")
+            await notifier.error("112", f"جستجوی وب ناموفق بود: {query[:80]} | err={err_detail[:200]}")
 
 # ==========================================================
 # ⏰ COMMAND: یادآور هوشمند (SMART REMINDER / 555 <دستور>)

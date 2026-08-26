@@ -857,7 +857,7 @@ async def web_search_handler(event):
             last_err = getattr(gemini, "_last_error", None)
             err_detail = str(last_err) if last_err else "unknown (response was Text.ERROR or empty)"
             print(f"⚠️ Web search failed for chat {chat_id}")
-            print(f"⚠️ WEB-SEARCH-DEBUG: model={getattr(gemini,'model',None)} use_search=True last_error={err_detail[:500]}")
+            print(f"⚠️ WEB-SEARCH-DEBUG: tried_models={getattr(gemini,'_tried_models',[])} last_error={err_detail[:500]}")
             await notifier.error("112", f"جستجوی وب ناموفق بود: {query[:80]} | err={err_detail[:200]}")
 
 # ==========================================================

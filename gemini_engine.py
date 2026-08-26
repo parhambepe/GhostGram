@@ -152,84 +152,110 @@ class GeminiEngine:
             if self._queue_lock is None:
                 self._queue_lock = asyncio.Lock()
 
+            # 🔎 Build candidate model list (web-search needs a search-capable model)
+            if use_search:
+                raw_candidates = [self.search_model, "gemini-2.0-flash", "gemini-2.5-flash-lite"]
+                seen = set()
+                model_candidates = []
+                for m in raw_candidates:
+                    if m and m not in seen:
+                        seen.add(m)
+                        model_candidates.append(m)
+                if not model_candidates:
+                    model_candidates = [self.model]
+            else:
+                model_candidates = [self.model]
+
             # Global Queue: Process AI requests strictly one by one
             async with self._queue_lock:
                 resp = None
                 last_err = None
+                tried_models = []
 
-                # 🔒 FINITE retry: MAX_GLOBAL_RETRIES full-cycles instead of infinite loop
-                for global_attempt in range(1, self.MAX_GLOBAL_RETRIES + 1):
-                    for attempt in range(num_keys):
-                        api_key = self._get_next_key()
+                for current_model in model_candidates:
+                    tried_models.append(current_model)
+                    # 🔒 FINITE retry: MAX_GLOBAL_RETRIES full-cycles instead of infinite loop
+                    for global_attempt in range(1, self.MAX_GLOBAL_RETRIES + 1):
+                        for attempt in range(num_keys):
+                            api_key = self._get_next_key()
 
-                        if not api_key:
-                            print("🚫 ALL API KEYS EXHAUSTED FOR TODAY! Dropping message.")
-                            return Text.ERROR
-
-                        client = self._client(api_key)
-
-                        try:
-                            # Increment usage counter right before making the API call
-                            from api_tracker import api_tracker
-                            api_tracker.record_usage(api_key)
-
-                            # Hard Timeout (longer for web-search grounded calls)
-                            resp = await asyncio.wait_for(
-                                loop.run_in_executor(
-                                    None,
-                                    lambda c=client, m=effective_model, cont=contents, conf=cfg: c.models.generate_content(model=m, contents=cont, config=conf)
-                                ),
-                                timeout=timeout
-                            )
-
-                            # Success! Reset circuit breaker
-                            api_tracker.record_success(api_key)
-                            break  # Success! Exit the round-robin loop
-
-                        except asyncio.TimeoutError:
-                            from api_tracker import api_tracker
-                            api_tracker.record_error(api_key)
-                            last_err = Exception(f"{timeout}s strict timeout reached")
-                            self._last_error = last_err
-                            print(f"⚠️ Key timeout ({timeout}s). Moving to next key in cycle...")
-                            continue
-                        except FloodWaitError as e:
-                            from api_tracker import api_tracker
-                            api_tracker.record_error(api_key)
-                            last_err = e
-                            self._last_error = e
-                            wait_s = min(int(getattr(e, "seconds", 10) or 10), 60)
-                            print(f"⏳ FloodWait {wait_s}s before next key attempt...")
-                            await asyncio.sleep(wait_s)
-                            continue
-                        except Exception as e:
-                            last_err = e
-                            self._last_error = e
-                            err_str = str(e)
-                            # 400 INVALID_ARGUMENT on media (e.g. undecodable image) will never
-                            # succeed by retrying the same payload — fail fast instead of
-                            # burning retries and tripping the circuit breaker.
-                            if "400 INVALID_ARGUMENT" in err_str or ("INVALID_ARGUMENT" in err_str and "Unable to process input image" in err_str):
-                                print(f"🚫 Permanent input error (bad/undecodable media). Dropping request: {err_str[:160]}")
+                            if not api_key:
+                                print("🚫 ALL API KEYS EXHAUSTED FOR TODAY! Dropping message.")
                                 return Text.ERROR
-                            from api_tracker import api_tracker
-                            api_tracker.record_error(api_key)
-                            print(f"⚠️ Key/Network Error ({type(e).__name__}). Moving to next key in cycle: {e}")
-                            continue
+
+                            client = self._client(api_key)
+
+                            try:
+                                # Increment usage counter right before making the API call
+                                from api_tracker import api_tracker
+                                api_tracker.record_usage(api_key)
+
+                                # Hard Timeout (longer for web-search grounded calls)
+                                resp = await asyncio.wait_for(
+                                    loop.run_in_executor(
+                                        None,
+                                        lambda c=client, m=current_model, cont=contents, conf=cfg: c.models.generate_content(model=m, contents=cont, config=conf)
+                                    ),
+                                    timeout=timeout
+                                )
+
+                                # Success! Reset circuit breaker
+                                api_tracker.record_success(api_key)
+                                break  # Success! Exit the round-robin loop
+
+                            except asyncio.TimeoutError:
+                                from api_tracker import api_tracker
+                                api_tracker.record_error(api_key)
+                                last_err = Exception(f"{timeout}s strict timeout reached")
+                                self._last_error = last_err
+                                print(f"⚠️ Key timeout ({timeout}s). Moving to next key in cycle...")
+                                continue
+                            except FloodWaitError as e:
+                                from api_tracker import api_tracker
+                                api_tracker.record_error(api_key)
+                                last_err = e
+                                self._last_error = e
+                                wait_s = min(int(getattr(e, "seconds", 10) or 10), 60)
+                                print(f"⏳ FloodWait {wait_s}s before next key attempt...")
+                                await asyncio.sleep(wait_s)
+                                continue
+                            except Exception as e:
+                                last_err = e
+                                self._last_error = e
+                                err_str = str(e)
+                                # 400 INVALID_ARGUMENT on media (e.g. undecodable image) will never
+                                # succeed by retrying the same payload — fail fast instead of
+                                # burning retries and tripping the circuit breaker.
+                                if "400 INVALID_ARGUMENT" in err_str or ("INVALID_ARGUMENT" in err_str and "Unable to process input image" in err_str):
+                                    print(f"🚫 Permanent input error (bad/undecodable media). Dropping request: {err_str[:160]}")
+                                    return Text.ERROR
+                                from api_tracker import api_tracker
+                                api_tracker.record_error(api_key)
+                                print(f"⚠️ Key/Network Error ({type(e).__name__}). Moving to next key in cycle: {e}")
+                                continue
+
+                        if resp is not None:
+                            break  # Successfully got a response, exit retry loop
+
+                        # All keys failed this cycle → bounded backoff (no infinite loop!)
+                        if global_attempt < self.MAX_GLOBAL_RETRIES:
+                            print(f"⚠️ Cycle {global_attempt}/{self.MAX_GLOBAL_RETRIES}: all {num_keys} keys failed. Retrying in {self.RETRY_SLEEP_SECONDS}s...")
+                            await asyncio.sleep(self.RETRY_SLEEP_SECONDS)
+                        else:
+                            print(f"🚫 Giving up after {self.MAX_GLOBAL_RETRIES} full cycles on model {current_model}. Last error: {last_err}")
 
                     if resp is not None:
-                        break  # Successfully got a response, exit retry loop
+                        self._tried_models = tried_models
+                        break  # got a response from this model, stop trying other models
 
-                    # All keys failed this cycle → bounded backoff (no infinite loop!)
-                    if global_attempt < self.MAX_GLOBAL_RETRIES:
-                        print(f"⚠️ Cycle {global_attempt}/{self.MAX_GLOBAL_RETRIES}: all {num_keys} keys failed. Retrying in {self.RETRY_SLEEP_SECONDS}s...")
-                        await asyncio.sleep(self.RETRY_SLEEP_SECONDS)
-                    else:
-                        print(f"🚫 Giving up after {self.MAX_GLOBAL_RETRIES} full cycles. Last error: {last_err}")
-                        return Text.ERROR
+                if resp is None:
+                    self._last_error = last_err
+                    self._tried_models = tried_models
+                    print(f"🚫 Web search failed on ALL models {tried_models}. Last error: {last_err}")
+                    return Text.ERROR
 
-            raw_text = (resp.text or "").strip()
-            return self._clean_output(raw_text)
+                raw_text = (resp.text or "").strip()
+                return self._clean_output(raw_text)
 
         except Exception as e:
             print(f"Error in GeminiEngine: {str(e)}")

@@ -110,12 +110,6 @@ class GeminiEngine:
 
         timeout = Config.SEARCH_TIMEOUT if use_search else Config.GEMINI_TIMEOUT
 
-        # 🔎 When web-search grounding is requested, route through a search-capable
-        # model (the configured default might be a *-flash-lite that rejects the tool).
-        effective_model = self.search_model if use_search else self.model
-        if use_search and effective_model != self.model:
-            print(f"🔎 Web-search: routing through '{effective_model}' (default '{self.model}' lacks google_search tool)")
-
         # Hard payload size limit (keep head+tail when truncating)
         MAX_CHARS = 50000
         if len(safe_user_msg) > MAX_CHARS:
@@ -140,7 +134,14 @@ class GeminiEngine:
                 cfg.response_mime_type = "application/json"
 
             if use_search:
-                cfg.tools = [types.Tool(google_search=types.GoogleSearch())]
+                try:
+                    cfg.tools = [types.Tool(google_search=types.GoogleSearch())]
+                    print(f"🔎 google_search tool attached OK for model routing")
+                except Exception as tool_err:
+                    print(f"🚫 google_search tool FAILED to attach: {type(tool_err).__name__}: {tool_err}")
+                    self._last_error = tool_err
+                    self._tried_models = []
+                    return Text.ERROR
 
             if not self.keys:
                 raise RuntimeError("NO_KEYS_CONFIGURED")
@@ -258,8 +259,9 @@ class GeminiEngine:
                 return self._clean_output(raw_text)
 
         except Exception as e:
-            print(f"Error in GeminiEngine: {str(e)}")
+            print(f"🚨 Error in GeminiEngine.get_response: {type(e).__name__}: {e}")
             self._last_error = e
+            self._tried_models = getattr(self, "_tried_models", [])
             return Text.ERROR
 
 # Global singleton instance

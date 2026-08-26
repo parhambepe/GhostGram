@@ -21,6 +21,7 @@ from reminder_parser import reminder_parser, AI_PARSE_PROMPT, extract_json_block
 from sticker_manager import sticker_manager
 from health_server import start_health_server
 from notifier import notifier
+from web_search import web_search, format_context
 import random
 
 client = (
@@ -827,7 +828,6 @@ async def web_search_handler(event):
             return
 
         input_chat = await event.get_input_chat()
-        now_persian = get_current_persian_datetime()
 
         # If replying to a message, include its content as context for the query
         context_note = ""
@@ -839,15 +839,27 @@ async def web_search_handler(event):
             except Exception:
                 pass
 
-        prompt = f"""سؤال کاربر: {query}
-{context_note}
-پاسخ کوتاه، دقیق و خودمونی بده. اطلاعات به‌روز لازم است پس از جستجوی گوگل استفاده کن.
-[زمان فعلی: {now_persian}]"""
-
-        system_prompt = "تو دستیار شخصی هستی که با جستجوی وب اطلاعات دقیق و به‌روز پیدا می‌کند. پاسخ فارسی، روان، بدون ایموجی و کوتاه."
         print(f"🌐 Web search requested in chat {chat_id}: {query[:60]}...")
         async with ContinuousTyping(client, input_chat):
-            response = await gemini.get_response(prompt, system_prompt, use_search=True)
+            # 1) Real web search (Bing scrape, no Google grounding tool needed)
+            results, search_err = await web_search.search_async(query, max_results=5)
+            if search_err or not results:
+                err_msg = f"سرچ وب نتیجه‌ای نداد: {search_err or 'no results'}"
+                print(f"⚠️ {err_msg}")
+                await notifier.error("112", f"[v2] {err_msg}")
+                return
+
+            # 2) Feed real snippets to Gemini for a clean Farsi summary
+            search_ctx = format_context(results)
+            prompt = f"""سؤال کاربر: {query}
+{context_note}
+نتایج جستجوی وب (واقعی):
+{search_ctx}
+
+با استفاده از نتایج بالا، پاسخ کوتاه، دقیق و خودمونی فارسی بده. اگه عدد/قیمتی هست دقیق بنویس. بدون ایموجی."""
+            system_prompt = "تو دستیار شخصی هستی که با استفاده از نتایج جستجوی وب اطلاعات دقیق و به‌روز پیدا می‌کند. پاسخ فارسی، روان و کوتاه."
+
+            response = await gemini.get_response(prompt, system_prompt, use_search=False)
             if response and response != Text.ERROR:
                 human_typing_time = calculate_human_typing_delay(response)
                 await asyncio.sleep(human_typing_time)
@@ -855,13 +867,10 @@ async def web_search_handler(event):
                 print(f"🌐 Web answer sent in chat {chat_id}")
             else:
                 last_err = getattr(gemini, "_last_error", None)
-                err_detail = str(last_err) if last_err else "unknown (response was Text.ERROR or empty)"
-                tried = getattr(gemini, "_tried_models", [])
-                print(f"⚠️ Web search failed for chat {chat_id}")
-                print(f"⚠️ WEB-SEARCH-DEBUG[v5931341]: tried_models={tried} last_error={err_detail[:500]}")
-                await notifier.error("112", f"[v5931341] جستجوی وب ناموفق بود: {query[:80]}\nerr={err_detail[:300]}\ntried={tried}")
+                err_detail = str(last_err) if last_err else "unknown (Gemini returned Text.ERROR)"
+                print(f"⚠️ Web search summary failed: {err_detail[:300]}")
+                await notifier.error("112", f"[v2] جستجو اوکی بود ولی خلاصه‌سازی شکست خورد:\n{err_detail[:300]}")
     except Exception as exc:
-        # Never fail silently — surface any unexpected crash to Saved Messages + logs
         err_msg = f"112 handler crashed: {type(exc).__name__}: {exc}"
         print(f"🚨 {err_msg}")
         try:

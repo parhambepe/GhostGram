@@ -814,51 +814,60 @@ async def catchup_summary_handler(event):
 # ==========================================================
 @client.on(events.NewMessage(outgoing=True, pattern=r'^112\s+(.+)$'))
 async def web_search_handler(event):
-    if not is_owner(event):
-        return
-    query = (event.pattern_match.group(1) or "").strip()
-    chat_id = event.chat_id
-    reply_to_id = event.reply_to_msg_id
+    try:
+        if not is_owner(event):
+            return
+        query = (event.pattern_match.group(1) or "").strip()
+        chat_id = event.chat_id
+        reply_to_id = event.reply_to_msg_id
 
-    await safe_delete(event)
+        await safe_delete(event)
 
-    if not query:
-        return
+        if not query:
+            return
 
-    input_chat = await event.get_input_chat()
-    now_persian = get_current_persian_datetime()
+        input_chat = await event.get_input_chat()
+        now_persian = get_current_persian_datetime()
 
-    # If replying to a message, include its content as context for the query
-    context_note = ""
-    if reply_to_id:
-        try:
-            reply_msg = await event.get_reply_message()
-            if reply_msg and reply_msg.text:
-                context_note = f"\n[متن پیام ریپلای‌شده که سؤال درباره آن است]:\n{reply_msg.text[:1000]}\n"
-        except Exception:
-            pass
+        # If replying to a message, include its content as context for the query
+        context_note = ""
+        if reply_to_id:
+            try:
+                reply_msg = await event.get_reply_message()
+                if reply_msg and reply_msg.text:
+                    context_note = f"\n[متن پیام ریپلای‌شده که سؤال درباره آن است]:\n{reply_msg.text[:1000]}\n"
+            except Exception:
+                pass
 
-    prompt = f"""سؤال کاربر: {query}
+        prompt = f"""سؤال کاربر: {query}
 {context_note}
 پاسخ کوتاه، دقیق و خودمونی بده. اطلاعات به‌روز لازم است پس از جستجوی گوگل استفاده کن.
 [زمان فعلی: {now_persian}]"""
 
-    system_prompt = "تو دستیار شخصی هستی که با جستجوی وب اطلاعات دقیق و به‌روز پیدا می‌کند. پاسخ فارسی، روان، بدون ایموجی و کوتاه."
-    print(f"🌐 Web search requested in chat {chat_id}: {query[:60]}...")
-    async with ContinuousTyping(client, input_chat):
-        response = await gemini.get_response(prompt, system_prompt, use_search=True)
-        if response and response != Text.ERROR:
-            human_typing_time = calculate_human_typing_delay(response)
-            await asyncio.sleep(human_typing_time)
-            await client.send_message(input_chat, response, reply_to=reply_to_id)
-            print(f"🌐 Web answer sent in chat {chat_id}")
-        else:
-            # DEBUG: capture the real underlying error so we can see WHY web search failed
-            last_err = getattr(gemini, "_last_error", None)
-            err_detail = str(last_err) if last_err else "unknown (response was Text.ERROR or empty)"
-            print(f"⚠️ Web search failed for chat {chat_id}")
-            print(f"⚠️ WEB-SEARCH-DEBUG: tried_models={getattr(gemini,'_tried_models',[])} last_error={err_detail[:500]}")
-            await notifier.error("112", f"جستجوی وب ناموفق بود: {query[:80]} | err={err_detail[:200]}")
+        system_prompt = "تو دستیار شخصی هستی که با جستجوی وب اطلاعات دقیق و به‌روز پیدا می‌کند. پاسخ فارسی، روان، بدون ایموجی و کوتاه."
+        print(f"🌐 Web search requested in chat {chat_id}: {query[:60]}...")
+        async with ContinuousTyping(client, input_chat):
+            response = await gemini.get_response(prompt, system_prompt, use_search=True)
+            if response and response != Text.ERROR:
+                human_typing_time = calculate_human_typing_delay(response)
+                await asyncio.sleep(human_typing_time)
+                await client.send_message(input_chat, response, reply_to=reply_to_id)
+                print(f"🌐 Web answer sent in chat {chat_id}")
+            else:
+                last_err = getattr(gemini, "_last_error", None)
+                err_detail = str(last_err) if last_err else "unknown (response was Text.ERROR or empty)"
+                tried = getattr(gemini, "_tried_models", [])
+                print(f"⚠️ Web search failed for chat {chat_id}")
+                print(f"⚠️ WEB-SEARCH-DEBUG: tried_models={tried} last_error={err_detail[:500]}")
+                await notifier.error("112", f"جستجوی وب ناموفق بود: {query[:80]}\nerr={err_detail[:300]}\ntried={tried}")
+    except Exception as exc:
+        # Never fail silently — surface any unexpected crash to Saved Messages + logs
+        err_msg = f"112 handler crashed: {type(exc).__name__}: {exc}"
+        print(f"🚨 {err_msg}")
+        try:
+            await notifier.error("112", err_msg[:500])
+        except Exception:
+            pass
 
 # ==========================================================
 # ⏰ COMMAND: یادآور هوشمند (SMART REMINDER / 555 <دستور>)

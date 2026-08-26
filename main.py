@@ -839,7 +839,7 @@ async def web_search_handler(event):
             except Exception:
                 pass
 
-        print(f"🌐 Web search requested in chat {chat_id}: {query[:60]}...")
+        print(f"🌐 Web search requested in chat {chat_id}: {query[:60]}... [MARKER_e9def36]")
         async with ContinuousTyping(client, input_chat):
             # 1) Real web search (Bing scrape, no Google grounding tool needed)
             results, search_err = await web_search.search_async(query, max_results=5)

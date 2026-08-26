@@ -858,8 +858,8 @@ async def web_search_handler(event):
                 err_detail = str(last_err) if last_err else "unknown (response was Text.ERROR or empty)"
                 tried = getattr(gemini, "_tried_models", [])
                 print(f"⚠️ Web search failed for chat {chat_id}")
-                print(f"⚠️ WEB-SEARCH-DEBUG: tried_models={tried} last_error={err_detail[:500]}")
-                await notifier.error("112", f"جستجوی وب ناموفق بود: {query[:80]}\nerr={err_detail[:300]}\ntried={tried}")
+                print(f"⚠️ WEB-SEARCH-DEBUG[v5931341]: tried_models={tried} last_error={err_detail[:500]}")
+                await notifier.error("112", f"[v5931341] جستجوی وب ناموفق بود: {query[:80]}\nerr={err_detail[:300]}\ntried={tried}")
     except Exception as exc:
         # Never fail silently — surface any unexpected crash to Saved Messages + logs
         err_msg = f"112 handler crashed: {type(exc).__name__}: {exc}"
